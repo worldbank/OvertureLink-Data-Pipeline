@@ -1,0 +1,21 @@
+selector:
+  by: division_country
+  iso2: "AF"
+
+# Overture configuration
+
+overture:
+  base_url: "s3://overturemaps-us-west-2/release"
+  s3_region: "us-west-2"
+overture_release: "2024-11-13.0"
+
+targets:
+  roads:
+    theme: transportation
+    type: segment
+    #filter: "class IN ('motorway', 'trunk', 'primary', 'secondary')"
+    agol:
+      item_title: "AFG — Overture Roads"
+      tags: ["overture", "roads", "afg"]
+      upsert_key: "id"
+      item_id: "45e41c3c7b3e4c5692858522d2ae53f7" # Your existing layer ID

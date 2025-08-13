@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "overture-pipeline"
+version = "0.1.0"
+description = "Cloud-native ETL pipeline for Overture Maps data to ArcGIS Online"
+readme = "README.md"
+requires-python = ">=3.11"
+
+authors = [
+    { name = "Ryan Arias Delafosse, World Bank", email = "rariasdelafosse@worldbank.org" }
+]
+
+dependencies = [
+    # Core geospatial and data processing
+    "arcgis>=2.4,<2.5",
+    "arcgis-mapping",
+    "duckdb==1.0.0",
+    "pyarrow==16.1.0",
+    "geopandas==0.14.4",
+    "pyogrio==0.9.0",
+    "shapely==2.0.4",
+    "pyproj==3.6.1",
+    "pandas==2.1.4",
+    
+    # CLI and configuration
+    "typer==0.12.3",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    
+    # Development tools
+    "pytest>=8.2.0",
+    "ruff>=0.5.6",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+o2agol = "o2agol.cli:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+lint.select = ["E","F","I","UP","B","SIM"]
+lint.ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

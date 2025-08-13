@@ -1,0 +1,41 @@
+name: Run Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      country:
+        description: "Country code (e.g., AFG)"
+        required: true
+        default: "AFG"
+      mode:
+        description: "initial | overwrite | append"
+        required: true
+        default: "initial"
+  schedule:
+    - cron: "0 5 1 * *"  # monthly on the 1st at 05:00 UTC
+
+env:
+  AGOL_PORTAL_URL: https://www.arcgis.com
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -U pip
+          pip install -r requirements.txt
+      - name: Run pipeline (placeholder)
+        env:
+          AGOL_CLIENT_ID: ${{ secrets.AGOL_CLIENT_ID }}
+          AGOL_CLIENT_SECRET: ${{ secrets.AGOL_CLIENT_SECRET }}
+        run: |
+          . .venv/bin/activate
+          python -c "print('Pipeline will run here. Country=${{ github.event.inputs.country || 'AFG' }}, Mode=${{ github.event.inputs.mode || 'initial' }}')"
