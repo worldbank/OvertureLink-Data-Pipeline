@@ -6,16 +6,16 @@ This is a cloud-native ETL pipine to extract Overture Maps data (such as roads, 
 ## Pipeline Overview
 - Ingest: DuckDB reads Overture GeoParquet remotely. We did this so the user doesn't have to download anything.
 - Transform: Normalize schema/geometry, retain stable Overture/GERS IDs, define/delete/add metadata fields.
-- Publish: ArcGIS Python API `add().publish()` for first run; `overwrite()` or `append(upsert)` for updates (testing both right now).
+- Publish: ArcGIS Python API `add().publish()` for first run; `overwrite()` for updates.
 - Automation: GitHub Actions (manual + schedule). Secrets via GitHub Environments for elements such as AGOL authentification.
 
 ## Requirements
 - Python 3.11+ (version must be compatiable with arcgis package)
 - AGOL credentials with World Bank. You can use this for your own purposes if you want with your own AGOl ccount. Add your credientials however you want. There is an example .env file for you to use securely.
 
-## Setup
+## Setup for Local Use
 
-### Create Virtual Environment
+### 1. Create Virtual Environment
 
 Create virtual environment
 `python -m venv .venv`
@@ -23,26 +23,26 @@ Create virtual environment
 Activate virtual environment
 On Windows:
 `.\.venv\Scripts\Activate.ps1`
+
 On macOS/Linux:
 `source .venv/bin/activate`
 
-### Install Dependencies
+### 2. Install Dependencies
 `pip install -e .`
 
-## Quick Start (local)
-1. Copy `configs/afg.yml` for your own country
-2. Use the .env example to define your variables  
-3. Build your command, for example:
-   # Using CLI entry point
-   o2agol roads --config configs/afg.yml --mode initial
-   
-   # Or using module directly
-   python -m o2agol.cli roads --config configs/afg.yml --mode initial
-4. After your first upload, you can add the item ID to the config file for it to be updated. Future plans for this to be automated.
+### 3. Define Environment
+- Copy `configs/afg.yml` for your own country
+- Use the .env example to define your variables  
+- Build your command, for example:
 
-## CI/CD
-- `ci.yml`: lint, type-check, unit tests on PR/main.
-- `run-pipeline.yml`: manual (`workflow_dispatch`) or schedule (cron). Uses environment secrets.
+### 4. Run commands
+- Using CLI entry point
+   `o2agol roads --config configs/afg.yml --mode initial`
+   
+- Or using module directly
+   `python -m o2agol.cli roads --config configs/afg.yml --mode initial`
+
+Note: after your first upload, you can add the item ID to the config file for it to be updated. Future plans for this to be automated.
 
 ## Config
 `configs/<country>.yml` includes:
@@ -59,24 +59,38 @@ On macOS/Linux:
 - Hosted Feature Layers (roads lines, buildings polygons).
 - Metadata based on config
 
-## Improvements
+## Planned Improvements
 - Automatically add item ID to config for update.
+- Using bbox to query before division clip for optimization.
+- Option for full dump for multiple uploads.
 - Schema mismatch on append: ensure `id` key matches.
 - Large export: chunk export by grid; raise `maxRecordCount`.
 
 ## List of options
+
+### Choosing config file
 - `-c configs/afg.yml` - points to your config file
+
+### Modes
 - `--mode initial` - for when you first upload an AGOL content item (after copy ID to config file)
 - `--mode overwrite` - for when you update an AGOL content item
+
+### Clipping
 - `--use-divisions` (default) - Uses Overture Divisions for precise boundaries
 - `--use-bbox` - Falls back to bounding box filtering if needed
+
+### Others
 - `--limit 1000` - Limits the features for testing purposes
 - `--log-to-file` - Logs generate in "/log" for debug purposes
 - `--dry-run` - Processes but doesn't publish to AGOL, good for testing without uploading every test.
 
-### Examples:
+## Examples:
 - `o2agol roads -c configs/afg.yml --mode overwrite --use-bbox --log-to-file` - Updates the Afghanistan roads content item in AGOL using bbox parameters, also logs terminal to file.
 - `o2agol roads -c configs/civ.yml --mode initial` - Creates a new roads content item in AGOL for CIV, using the default Overture division clipping
+
+## CI/CD
+- `ci.yml`: lint, type-check, unit tests on PR/main.
+- `run-pipeline.yml`: manual (`workflow_dispatch`) or schedule (cron). Uses environment secrets.
 
 ## Sources
 - Overture documentation: https://docs.overturemaps.org/guides/divisions/
