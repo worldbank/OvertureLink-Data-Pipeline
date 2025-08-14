@@ -9,6 +9,7 @@ import yaml
 from dotenv import load_dotenv
 
 from .config import Config
+from .config.template_config import TemplateConfigParser
 from .duck import fetch_gdf
 from .publish import publish_or_update
 from .transform import normalize_schema
@@ -55,10 +56,24 @@ def setup_logging(verbose: bool, target_name: str = None, mode: str = None, enab
     )
 
 
+def is_template_config(config_path: str) -> bool:
+    """
+    Detect if config file uses the template format with dynamic variables.
+    
+    Template configs have top-level 'country' and 'templates' sections.
+    """
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        return 'country' in config and 'templates' in config
+    except Exception:
+        return False
+
+
 def load_pipeline_config(config_path: str) -> Dict[str, Any]:
     """
     Load pipeline configuration from YAML file and combine with secure credentials.
-    YAML configuration is the single source of truth for pipeline settings.
+    Supports both legacy and enhanced config formats with templating.
     
     Args:
         config_path: Path to YAML configuration file
@@ -73,38 +88,79 @@ def load_pipeline_config(config_path: str) -> Dict[str, Any]:
     """
     # Load secure configuration (credentials and DuckDB settings only)
     secure_config = Config()
+    gis_connection = secure_config.create_gis_connection()
     
-    # Load pipeline configuration from YAML
-    config_file = Path(config_path)
-    if not config_file.exists():
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    
-    with open(config_file, 'r') as f:
-        yaml_config = yaml.safe_load(f)
-    
-    # Extract required Overture settings from YAML
-    overture_release = yaml_config.get('overture_release')
-    if not overture_release:
-        raise ValueError("overture_release is required in YAML configuration")
-    
-    overture_s3 = yaml_config.get('overture_s3', {})
-    s3_region = overture_s3.get('region', 'us-west-2')
-    s3_bucket = overture_s3.get('bucket', f'overturemaps-{s3_region}')
-    
-    # Create unified configuration using YAML as source of truth
-    pipeline_config = {
-        'secure': secure_config,
-        'gis': secure_config.create_gis_connection(),
-        'duckdb_settings': secure_config.get_duckdb_settings(),
-        'overture': {
-            'release': overture_release,        # From YAML
-            's3_region': s3_region,            # From YAML  
-            'bucket': s3_bucket,               # From YAML
-            'base_url': f"s3://{s3_bucket}/release/{overture_release}"
-        },
-        'yaml': yaml_config,
-        'environment': secure_config.environment
-    }
+    # Check config format and load appropriately
+    if is_template_config(config_path):
+        # Template config with dynamic variables
+        template_parser = TemplateConfigParser(config_path)
+        
+        # Validate template config
+        validation_issues = template_parser.validate_config()
+        if validation_issues:
+            logging.warning(f"Template config validation issues: {validation_issues}")
+        
+        # Get overture config from template parser
+        overture_config = template_parser.get_overture_config()
+        overture_release = overture_config.get('release')
+        s3_region = overture_config.get('s3_region', 'us-west-2')
+        
+        # Build base URL from template config
+        base_url = overture_config.get('base_url', f's3://overturemaps-{s3_region}/release')
+        if not base_url.endswith(overture_release):
+            base_url = f"{base_url}/{overture_release}"
+        
+        pipeline_config = {
+            'secure': secure_config,
+            'gis': gis_connection,
+            'duckdb_settings': secure_config.get_duckdb_settings(),
+            'overture': {
+                'release': overture_release,
+                's3_region': s3_region,
+                'base_url': base_url
+            },
+            'yaml': template_parser.raw_config,  # For backward compatibility
+            'template': template_parser,  # Template parser for metadata
+            'environment': secure_config.environment,
+            'config_format': 'template'
+        }
+        
+        logging.info(f"Loaded template config: {template_parser.country.name} ({template_parser.country.iso3})")
+        
+    else:
+        # Legacy config format
+        config_file = Path(config_path)
+        if not config_file.exists():
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        
+        with open(config_file, 'r') as f:
+            yaml_config = yaml.safe_load(f)
+        
+        # Extract required Overture settings from YAML
+        overture_release = yaml_config.get('overture_release')
+        if not overture_release:
+            raise ValueError("overture_release is required in YAML configuration")
+        
+        overture_s3 = yaml_config.get('overture_s3', {})
+        s3_region = overture_s3.get('region', 'us-west-2')
+        s3_bucket = overture_s3.get('bucket', f'overturemaps-{s3_region}')
+        
+        pipeline_config = {
+            'secure': secure_config,
+            'gis': gis_connection,
+            'duckdb_settings': secure_config.get_duckdb_settings(),
+            'overture': {
+                'release': overture_release,        # From YAML
+                's3_region': s3_region,            # From YAML  
+                'bucket': s3_bucket,               # From YAML
+                'base_url': f"s3://{s3_bucket}/release/{overture_release}"
+            },
+            'yaml': yaml_config,
+            'environment': secure_config.environment,
+            'config_format': 'legacy'
+        }
+        
+        logging.info(f"Loaded legacy config: {overture_release}")
     
     return pipeline_config
 
@@ -120,8 +176,12 @@ def get_selector_config(cfg: Dict[str, Any], iso2: Optional[str] = None) -> Dict
     Returns:
         Selector configuration for spatial filtering
     """
-    # Get selector from YAML config or create default
-    selector = cfg['yaml'].get('selector', {})
+    if cfg.get('config_format') == 'template':
+        # Template config with resolved variables
+        selector = cfg['template'].get_selector_config()
+    else:
+        # Legacy config
+        selector = cfg['yaml'].get('selector', {})
     
     # Apply ISO2 override if specified
     if iso2:
@@ -146,11 +206,27 @@ def get_target_config(cfg: Dict[str, Any], target_name: str) -> Dict[str, Any]:
         KeyError: If target not found in configuration
         ValueError: If required target fields are missing
     """
-    targets = cfg['yaml'].get('targets', {})
-    if target_name not in targets:
-        raise KeyError(f"Target '{target_name}' not found in configuration. Available: {list(targets.keys())}")
-    
-    target_config = targets[target_name].copy()  # Make a copy to avoid modifying original
+    if cfg.get('config_format') == 'template':
+        # Template config - get filter config from template parser
+        template = cfg['template']
+        filter_config = template.get_target_filter_config(target_name)
+        
+        # Combine with raw target config for backward compatibility
+        targets = cfg['yaml'].get('targets', {})
+        if target_name not in targets:
+            available = list(targets.keys())
+            raise KeyError(f"Target '{target_name}' not found. Available: {available}")
+        
+        target_config = targets[target_name].copy()
+        target_config.update(filter_config)  # Overlay enhanced filter config
+        
+    else:
+        # Legacy config
+        targets = cfg['yaml'].get('targets', {})
+        if target_name not in targets:
+            raise KeyError(f"Target '{target_name}' not found in configuration. Available: {list(targets.keys())}")
+        
+        target_config = targets[target_name].copy()
     
     # Ensure required fields are present
     if 'theme' not in target_config:
@@ -270,7 +346,14 @@ def process_target(
             logging.info("DRY RUN VALIDATION MODE")
             logging.info("=" * 50)
             logging.info(f"Target features for processing: {len(gdf):,}")
-            logging.info(f"Target configuration: {target_config.get('agol', {}).get('item_title', 'Not specified')}")
+            # Get appropriate title for logging
+            if cfg.get('config_format') == 'template':
+                template_metadata = cfg['template'].get_target_metadata(target_name)
+                title_display = template_metadata.item_title
+            else:
+                title_display = target_config.get('agol', {}).get('item_title', 'Not specified')
+            
+            logging.info(f"Target configuration: {title_display}")
             logging.info(f"Processing mode: {mode}")
             
             item_id = target_config.get('agol', {}).get('item_id')
@@ -293,9 +376,33 @@ def process_target(
         logging.info("=" * 50)
         
         # Create target config adapter for publish function
-        target_adapter = type('TargetConfig', (), {
-            'agol': type('AGOLConfig', (), target_config.get('agol', {}))()
-        })()
+        if cfg.get('config_format') == 'template':
+            # Use template metadata with dynamic variables
+            template_metadata = cfg['template'].get_target_metadata(target_name)
+            
+            # Create AGOL config with essential metadata
+            agol_config_dict = {
+                'item_title': template_metadata.item_title,
+                'snippet': template_metadata.snippet,
+                'description': template_metadata.description,
+                'tags': template_metadata.tags,
+                'access_information': template_metadata.access_information,
+                'license_info': template_metadata.license_info,
+                'upsert_key': template_metadata.upsert_key,
+                'item_id': template_metadata.item_id
+            }
+            
+            target_adapter = type('TargetConfig', (), {
+                'agol': type('AGOLConfig', (), agol_config_dict)()
+            })()
+            
+            logging.info(f"Using template metadata: {template_metadata.item_title}")
+            
+        else:
+            # Legacy config adapter
+            target_adapter = type('TargetConfig', (), {
+                'agol': type('AGOLConfig', (), target_config.get('agol', {}))()
+            })()
         
         result = publish_or_update(gdf, target_adapter, mode)
         
@@ -415,6 +522,72 @@ def places(
     relevant to development and humanitarian operations.
     """
     process_target("places", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+
+
+@app.command("education")
+def education(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
+    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
+    use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
+    log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+):
+    """
+    Process education facilities from Overture Maps for publication to ArcGIS Online.
+
+    Includes schools, colleges, universities, and other educational institutions
+    filtered using Overture's education category hierarchy.
+    """
+    process_target("education", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+
+
+@app.command("health")
+def health(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
+    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
+    use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
+    log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+):
+    """
+    Process health and medical facilities from Overture Maps for publication to ArcGIS Online.
+
+    Includes hospitals, clinics, health centers, dental offices, and other medical
+    facilities filtered using Overture's health_and_medical category hierarchy.
+    """
+    process_target("health", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+
+
+@app.command("markets")
+def markets(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
+    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
+    use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
+    log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+):
+    """
+    Process markets and retail establishments from Overture Maps for publication to ArcGIS Online.
+
+    Includes marketplaces, grocery stores, shopping centers, and retail establishments
+    filtered using Overture's retail and market category hierarchies.
+    """
+    process_target("markets", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
 
 
 @app.command("version")

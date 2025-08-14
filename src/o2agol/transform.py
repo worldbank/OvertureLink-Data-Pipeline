@@ -6,18 +6,171 @@ import geopandas as gpd
 
 
 def normalize_schema(
-    gdf: gpd.GeoDataFrame, layer: Literal["roads", "buildings"]
+    gdf: gpd.GeoDataFrame, layer: Literal["roads", "buildings", "education", "health", "markets", "places"]
 ) -> gpd.GeoDataFrame:
     if gdf.crs is None or gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(4326)
 
-    # Keep only a few core fields to start. You can expand later.
-    keep = [c for c in ["id", "class", "subtype"] if c in gdf.columns]
+    # Handle different layer types with appropriate field selection
+    if layer in ["roads"]:
+        # Transportation data
+        keep = [c for c in ["id", "class", "subtype", "names", "routes"] if c in gdf.columns]
+        
+    elif layer in ["buildings"]:
+        # Building data  
+        keep = [c for c in ["id", "names", "class", "subtype", "height", "num_floors"] if c in gdf.columns]
+        
+    elif layer in ["education", "health", "markets", "places"]:
+        # Places data - extract useful fields from complex JSON structures
+        keep = ["id"]
+        
+        # Extract primary name from names JSON
+        if "names" in gdf.columns:
+            gdf["name"] = gdf["names"].apply(extract_primary_name)
+            keep.append("name")
+        
+        # Extract primary category from categories JSON
+        if "categories" in gdf.columns:
+            gdf["category"] = gdf["categories"].apply(extract_primary_category)
+            keep.append("category")
+        
+        # Keep confidence if available
+        if "confidence" in gdf.columns:
+            keep.append("confidence")
+        
+        # Extract contact information from complex fields
+        if "phones" in gdf.columns:
+            gdf["phone"] = gdf["phones"].apply(extract_first_phone)
+            keep.append("phone")
+            
+        if "websites" in gdf.columns:
+            gdf["website"] = gdf["websites"].apply(extract_first_website)
+            keep.append("website")
+            
+        if "addresses" in gdf.columns:
+            gdf["address"] = gdf["addresses"].apply(extract_formatted_address)
+            keep.append("address")
+    
+    else:
+        # Default fallback
+        keep = [c for c in ["id", "class", "subtype"] if c in gdf.columns]
+    
+    # Ensure geometry is included
     cols = keep + ["geometry"]
-    gdf = gdf[cols]
+    gdf = gdf[[c for c in cols if c in gdf.columns]]
 
     # Ensure id is string (for AGOL upsert)
     if "id" in gdf.columns:
         gdf["id"] = gdf["id"].astype(str)
 
     return gdf
+
+
+def extract_primary_name(names_json) -> str:
+    """Extract primary name from Overture names JSON structure"""
+    if not names_json or names_json == '{}':
+        return None
+    
+    try:
+        if isinstance(names_json, dict):
+            # Direct dict access
+            return names_json.get('primary', names_json.get('common', list(names_json.values())[0] if names_json else None))
+        elif isinstance(names_json, str):
+            import json
+            names = json.loads(names_json)
+            return names.get('primary', names.get('common', list(names.values())[0] if names else None))
+    except:
+        pass
+    return str(names_json)[:100] if names_json else None
+
+
+def extract_primary_category(categories_json) -> str:
+    """Extract primary category from Overture categories JSON structure"""
+    if not categories_json or categories_json == '{}':
+        return None
+        
+    try:
+        if isinstance(categories_json, dict):
+            return categories_json.get('primary')
+        elif isinstance(categories_json, str):
+            import json
+            categories = json.loads(categories_json)
+            return categories.get('primary')
+    except:
+        pass
+    return str(categories_json)[:50] if categories_json else None
+
+
+def extract_first_phone(phones_json) -> str:
+    """Extract first phone number from phones array"""
+    if not phones_json:
+        return None
+        
+    try:
+        if isinstance(phones_json, list) and phones_json:
+            return phones_json[0]
+        elif isinstance(phones_json, str):
+            import json
+            phones = json.loads(phones_json)
+            return phones[0] if phones and isinstance(phones, list) else None
+    except:
+        pass
+    return None
+
+
+def extract_first_website(websites_json) -> str:
+    """Extract first website from websites array"""
+    if not websites_json:
+        return None
+        
+    try:
+        if isinstance(websites_json, list) and websites_json:
+            return websites_json[0]
+        elif isinstance(websites_json, str):
+            import json
+            websites = json.loads(websites_json)
+            return websites[0] if websites and isinstance(websites, list) else None
+    except:
+        pass
+    return None
+
+
+def extract_formatted_address(addresses_json) -> str:
+    """Extract formatted address string from addresses array"""
+    if not addresses_json:
+        return None
+        
+    try:
+        if isinstance(addresses_json, list) and addresses_json:
+            addr = addresses_json[0]
+            if isinstance(addr, dict):
+                # Build formatted address from components
+                parts = []
+                if addr.get('freeform'):
+                    parts.append(addr['freeform'])
+                if addr.get('locality'):
+                    parts.append(addr['locality'])
+                if addr.get('region'):
+                    parts.append(addr['region'])
+                if addr.get('country'):
+                    parts.append(addr['country'])
+                return ', '.join(parts) if parts else None
+        elif isinstance(addresses_json, str):
+            import json
+            addresses = json.loads(addresses_json)
+            if addresses and isinstance(addresses, list):
+                addr = addresses[0]
+                if isinstance(addr, dict):
+                    parts = []
+                    if addr.get('freeform'):
+                        parts.append(addr['freeform'])
+                    if addr.get('locality'):
+                        parts.append(addr['locality'])
+                    if addr.get('region'):
+                        parts.append(addr['region'])
+                    if addr.get('country'):
+                        parts.append(addr['country'])
+                    return ', '.join(parts) if parts else None
+    except:
+        pass
+    return None

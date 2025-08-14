@@ -1,25 +1,26 @@
 # Configuration template for Overture Maps to ArcGIS pipelines, copy for your own use
+# This was originally made for World Bank uploads, so change whatever you need to fit your use case
 
 # Country/Region Metadata (Top-level)
 country:
-  name: "Afghanistan"            # Full country name for titles
-  iso2: "af"                    # 2-letter ISO code
-  iso3: "afg"                   # 3-letter ISO code for tags
-  region: "mena"          # Regional classification
+  name: "Counter name here"            # Full country name for titles
+  iso2: "ISO 2 here"                    # 2-letter ISO code
+  iso3: "ISO3 here"                   # 3-letter ISO code for tags
+  region: "Region here"          # Regional classification
   bbox: [60.5, 29.4, 74.9, 38.5]  # [min_lon, min_lat, max_lon, max_lat]
 
 # Data Source Configuration
 overture:
   base_url: "s3://overturemaps-us-west-2/release"
   s3_region: "us-west-2"
-  release: "2024-11-13.0"
+  release: "2024-11-13.0" # choose your release date
 
 # Organization Metadata Templates
 organization:
-  name: "Ryan Arias Delafosse"
-  contact_email: "rariasdelafosse@worldbank.org"
-  attribution: "World Bank Group"
-  license: "Internal use only. External sharing requires approval."
+  name: "Name"
+  contact_email: "Email
+  attribution: "Organization"
+  license: "Licensing information here."
   update_frequency: "Monthly"
 
 # Global Content Templates (Using dynamic variables) You have to use HTML for it to appear correctly in AGOL.

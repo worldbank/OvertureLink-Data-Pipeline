@@ -1,12 +1,12 @@
-# Overture to ArcGIS Online Pipeline
+# Overture Maps Data to ArcGIS Online Pipeline
 
 ## Purpose
 This is a cloud-native ETL pipine to extract Overture Maps data (such as roads, buildings), transform to an AGOL-ready schema, and publish as a feature layer in ArcGIS Online. This is designed to align with Overture's monthly releases and for country-specific data pulls.
 
 ## Pipeline Overview
-- Ingest: DuckDB reads Overture GeoParquet remotely. We did this so the user doesn't have to download anything.
-- Transform: Normalize schema/geometry, retain stable Overture/GERS IDs, define/delete/add metadata fields.
-- Publish: ArcGIS Python API `add().publish()` for first run; `overwrite()` for updates.
+- Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3. We did this so the user doesn't have to download anything.
+- Transform (`transform.py`): Normalize schema/geometry, retain stable Overture/GERS IDs, define/delete/add metadata fields.
+- Publish (`publish.py`): ArcGIS Python API `add().publish()` for first run; `overwrite()` for updates.
 - Automation: GitHub Actions (manual + schedule). Secrets via GitHub Environments for elements such as AGOL authentification.
 
 ## Requirements
@@ -16,7 +16,6 @@ This is a cloud-native ETL pipine to extract Overture Maps data (such as roads, 
 ## Setup for Local Use
 
 ### 1. Create Virtual Environment
-
 Create virtual environment
 `python -m venv .venv`
 
@@ -48,12 +47,12 @@ Note: after your first upload, you can add the item ID to the config file for it
 `configs/<country>.yml` includes:
 - `overture_release`: "latest" or a specific date.
 - `selector`: Add ISO2 country code 
-- `targets`: roads/buildings with layer titles, item IDs (for updates), field maps, filters.
+- `targets`: roads/buildings with layer titles, item IDs (for updates), filters.
 - `mode`: initial/overwrite/append.
 
 ### Clip modes
-- Using bbox: bbox-only overlap. For development due to its speed. Use `--use-bbox` 
-- Overture Division Clip: geometric clip with `ST_Intersects` and a light polygon simplify. Use `--use-divisions` for production (or neither flag, as it is default).
+- Box: bbox-only overlap. For development due to its speed. Use `--use-bbox` 
+- Overture Division Clip: geometric clip with `ST_Intersects`. Use `--use-divisions` for production (or neither flag, as it is default).
 
 ## Outputs in AGOL
 - Hosted Feature Layers (roads lines, buildings polygons).
@@ -68,6 +67,21 @@ Note: after your first upload, you can add the item ID to the config file for it
 
 ## List of options
 
+### Choosing query
+There are sets of queries prebuilt that you can find in the configs folder but you can create your own. 
+
+#### Lines
+- `roads` - Transportation networks (all roads, not filtered). `theme: transportation`
+
+#### Points
+- `education` - Education facilities (schools, colleges, universities) `"categories.primary = 'education'"`
+- `markets` - Markets and retail establishments. `filter: "categories.primary = 'retail'"`
+- `health` - Health facilities (hospitals, clinics, health centers). `filter: "categories.primary = 'health_and_medical'"`
+- `places` - All points of interest (unfiltered)
+
+#### Polygons
+- `buildings` - Building footprints 
+
 ### Choosing config file
 - `-c configs/afg.yml` - points to your config file
 
@@ -77,16 +91,23 @@ Note: after your first upload, you can add the item ID to the config file for it
 
 ### Clipping
 - `--use-divisions` (default) - Uses Overture Divisions for precise boundaries
-- `--use-bbox` - Falls back to bounding box filtering if needed
+- `--use-bbox` - Takes the bbox without clipping on the admin boundaries. This is much faster than clipping along the borders of the country polygon. 
 
-### Others
+### Other parameters
 - `--limit 1000` - Limits the features for testing purposes
 - `--log-to-file` - Logs generate in "/log" for debug purposes
 - `--dry-run` - Processes but doesn't publish to AGOL, good for testing without uploading every test.
 
 ## Examples:
+
+### Core Infrastructure
 - `o2agol roads -c configs/afg.yml --mode overwrite --use-bbox --log-to-file` - Updates the Afghanistan roads content item in AGOL using bbox parameters, also logs terminal to file.
-- `o2agol roads -c configs/civ.yml --mode initial` - Creates a new roads content item in AGOL for CIV, using the default Overture division clipping
+- `o2agol buildings -c configs/afg.yml --mode initial` - Creates a new buildings content item in AGOL for Afghanistan
+
+### Sectoral Facilities
+- `o2agol education -c configs/afg.yml --mode initial` - Creates a new education facilities layer for Afghanistan
+- `o2agol health -c configs/afg.yml --mode overwrite --use-bbox --limit 1000` - Updates health facilities using bbox filtering with 1000 feature limit for testing
+- `o2agol markets -c configs/afg.yml --mode initial --dry-run` - Validates market facilities configuration without publishing
 
 ## CI/CD
 - `ci.yml`: lint, type-check, unit tests on PR/main.

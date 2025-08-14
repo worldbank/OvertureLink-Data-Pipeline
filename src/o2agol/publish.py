@@ -122,7 +122,7 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
         raise RuntimeError("No features to publish - GeoDataFrame is empty")
 
     # Validate configuration against mode
-    has_item_id = tgt.agol.item_id is not None and tgt.agol.item_id.strip() != ""
+    has_item_id = getattr(tgt.agol, 'item_id', None) is not None and getattr(tgt.agol, 'item_id', '').strip() != ""
     
     if mode == "initial" and has_item_id:
         logging.warning(
@@ -149,16 +149,37 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
         tmp = _gdf_to_geojson_tempfile(gdf)
         
         try:
-            item = gis.content.add(
-                {
-                    "type": "GeoJson", 
-                    "title": title, 
-                    "tags": ",".join(tags),
-                    "description": f"Overture Maps data with {len(gdf):,} features",
-                    "snippet": f"Generated from Overture Maps pipeline - {len(gdf):,} features"
-                },
-                data=tmp.name,
-            )
+            # Build comprehensive metadata dict for enterprise publishing
+            item_properties = {
+                "type": "GeoJson",
+                "title": title,
+                "tags": ",".join(tags),
+            }
+            
+            # Add enhanced metadata fields if available
+            if hasattr(tgt.agol, 'snippet') and tgt.agol.snippet:
+                item_properties["snippet"] = tgt.agol.snippet
+            else:
+                item_properties["snippet"] = f"Generated from Overture Maps pipeline - {len(gdf):,} features"
+            
+            if hasattr(tgt.agol, 'description') and tgt.agol.description:
+                item_properties["description"] = tgt.agol.description
+            else:
+                item_properties["description"] = f"Overture Maps data with {len(gdf):,} features"
+            
+            # Add ESRI enterprise metadata fields if available
+            if hasattr(tgt.agol, 'access_information') and tgt.agol.access_information:
+                item_properties["accessInformation"] = tgt.agol.access_information
+            
+            if hasattr(tgt.agol, 'license_info') and tgt.agol.license_info:
+                item_properties["licenseInfo"] = tgt.agol.license_info
+            
+            # Note: Removed categories, type_keywords, and custom properties 
+            # as they require admin permissions and add unnecessary complexity
+            
+            logging.info(f"Creating item with metadata: {len(item_properties)} fields")
+            
+            item = gis.content.add(item_properties, data=tmp.name)
             
             fl_item = item.publish()
             logging.info(f"Created layer '{fl_item.title}' with ID: {fl_item.itemid}")
@@ -176,7 +197,7 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
 
     # Update existing hosted feature layer
     if mode in ("overwrite", "append"):
-        item_id = tgt.agol.item_id
+        item_id = getattr(tgt.agol, 'item_id', None)
         fl_item = gis.content.get(item_id)
         
         if not fl_item:
@@ -265,12 +286,3 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
     raise ValueError(f"Unsupported mode: {mode}. Use 'initial', 'overwrite', or 'append'")
 
 
-# Convenience function for backward compatibility
-def get_gis_for_publishing() -> GIS:
-    """
-    Convenience function to get ArcGIS connection for publishing.
-    
-    Returns:
-        Authenticated GIS connection ready for publishing operations
-    """
-    return _login_gis_for_publish()

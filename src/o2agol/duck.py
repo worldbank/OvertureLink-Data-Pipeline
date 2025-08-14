@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 import time
 import tempfile
 import platform
@@ -17,34 +16,16 @@ from .config import Config
 # Country bounding boxes for efficient spatial filtering
 # Eliminates expensive polygon-based country boundary lookups
 COUNTRY_BBOXES = {
-    'AF': (60.5, 29.4, 74.9, 38.5),   # Afghanistan - Corrected coordinates
+    'AF': (60.5, 29.4, 74.9, 38.5),   # Afghanistan
     'PK': (60.9, 23.6, 77.8, 37.1),   # Pakistan
     'BD': (88.0, 20.7, 92.7, 26.6),   # Bangladesh  
     'IN': (68.1, 6.7, 97.4, 37.1),    # India
 }
 
 
-def _parquet_url(secure_config: Config, theme: str, type_: str) -> str:
-    """Return proper parquet URL for S3 storage."""
-    # Use the new config system's Overture settings
-    return f"{secure_config.overture.base_url}/theme={theme}/type={type_}/*.parquet"
-
-
 def _parquet_url_from_config(overture_config: dict, theme: str, type_: str) -> str:
     """Return proper parquet URL using unified Overture configuration."""
     return f"{overture_config['base_url']}/theme={theme}/type={type_}/*.parquet"
-
-
-def _to_gdf(tbl) -> gpd.GeoDataFrame:
-    """Convert Arrow table to GeoDataFrame with optimized geometry handling."""
-    df = tbl.to_pandas(types_mapper=pd.ArrowDtype)
-    if "geom_wkb" not in df.columns:
-        raise ValueError("Expected column 'geom_wkb' missing from result")
-    df["geometry"] = df["geom_wkb"].apply(
-        lambda b: swkb.loads(bytes(b)) if b is not None else None
-    )
-    df = df.drop(columns=["geom_wkb"])
-    return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
 
 
 def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
@@ -123,9 +104,8 @@ def _extract_config_data(config_obj) -> tuple:
         # Simple extraction - same as before
         targets = {name: getattr(target, '__dict__', target) for name, target in config_obj.targets.items()}
         
-        # Quick debug to see what we actually get
-        print(f"SIMPLE DEBUG: targets = {targets}")
-        print(f"SIMPLE DEBUG: raw target = {dict(config_obj.targets['roads'].__dict__)}, vars = {vars(config_obj.targets['roads'])}")
+        # Configuration extracted successfully
+        logging.debug(f"Loaded {len(targets)} target(s): {list(targets.keys())}")
             
         return secure_config, selector, targets, overture_config
     else:
@@ -236,6 +216,29 @@ def _fetch_via_temp_file(con: duckdb.DuckDBPyConnection, sql: str) -> gpd.GeoDat
                     time.sleep(1)  # Wait before retry
 
 
+def _get_columns_for_target_type(target_type: str) -> list[str]:
+    """
+    Get essential columns for a specific Overture data type.
+    
+    Centralizes column selection logic to avoid duplication between
+    different query building functions.
+    
+    Args:
+        target_type: Overture data type (segment, building, place, etc.)
+        
+    Returns:
+        List of column names for the target type
+    """
+    if target_type == "segment":  # Transportation
+        return ['id', 'class', 'subtype', 'names', 'sources', 'version', 'routes']
+    elif target_type == "building":  # Buildings
+        return ['id', 'names', 'sources', 'version', 'height', 'num_floors', 'class', 'subtype']
+    elif target_type == "place":  # Places
+        return ['id', 'names', 'sources', 'version', 'categories', 'confidence', 'addresses', 'phones', 'websites']
+    else:
+        return ['id', 'names', 'sources', 'version', 'class', 'subtype']
+
+
 def _build_divisions_query(overture_config: dict, target_name: str, target_config: dict, selector: dict, limit: int = None) -> str:
     """
     Build query using Overture Divisions for precise country boundaries.
@@ -248,16 +251,8 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
     if not target_type or not target_theme:
         raise ValueError(f"Missing theme ({target_theme}) or type ({target_type}) in target configuration")
     
-    # Select essential columns based on data type
-    if target_type == "segment":  # Transportation
-        columns = ['id', 'class', 'subtype', 'names', 'sources', 'version', 'routes']
-    elif target_type == "building":  # Buildings
-        columns = ['id', 'names', 'sources', 'version', 'height', 'num_floors', 'class', 'subtype']
-    elif target_type == "place":  # Places
-        columns = ['id', 'names', 'sources', 'version', 'class', 'subtype', 'categories']
-    else:
-        columns = ['id', 'names', 'sources', 'version', 'class', 'subtype']
-    
+    # Use centralized column selection logic
+    columns = _get_columns_for_target_type(target_type)
     cols_sql = ", ".join(columns)
     
     # Get Overture data URLs using unified config
@@ -303,14 +298,8 @@ def _build_optimized_query(parquet_url: str, xmin: float, ymin: float, xmax: flo
     """
     target_type = target_config.get('type')
     
-    # Select essential columns based on data type
-    if target_type == "segment":  # Transportation
-        columns = ['id', 'class', 'subtype', 'names', 'sources', 'version', 'routes']
-    elif target_type == "building":  # Buildings
-        columns = ['id', 'names', 'sources', 'version', 'height', 'num_floors', 'class', 'subtype']
-    else:
-        columns = ['id', 'names', 'sources', 'version', 'class', 'subtype']
-    
+    # Use centralized column selection logic
+    columns = _get_columns_for_target_type(target_type)
     cols_sql = ", ".join(columns)
     
     # Optimized query with early geometry type conversion
@@ -333,57 +322,6 @@ def _build_optimized_query(parquet_url: str, xmin: float, ymin: float, xmax: flo
         sql += f" LIMIT {limit}"
     
     return sql
-
-
-def debug_divisions_structure(secure_config: Config) -> None:
-    """
-    Debug function to inspect the actual structure of divisions data.
-    """
-    con = setup_duckdb_optimized(secure_config)
-    divisions_url = f"{secure_config.overture.base_url}/theme=divisions/type=division_area/*.parquet"
-    
-    try:
-        # First, let's see what columns exist
-        schema_sql = f"""
-        SELECT * FROM read_parquet('{divisions_url}', filename=true, hive_partitioning=1)
-        WHERE subtype = 'country'
-        LIMIT 1
-        """
-        
-        result = con.execute(schema_sql).fetchdf()
-        print("Available columns in divisions data:")
-        print(result.columns.tolist())
-        print("\nSample country record:")
-        print(result.to_dict('records')[0] if not result.empty else "No records found")
-        
-    finally:
-        con.close()
-
-
-def debug_divisions_afghanistan(secure_config: Config) -> str:
-    """
-    Diagnostic query to examine Afghanistan entries in Overture divisions dataset.
-    """
-    divisions_url = f"{secure_config.overture.base_url}/theme=divisions/type=division_area/*.parquet"
-    
-    return f"""
-    SELECT 
-        country,
-        names.primary as primary_name,
-        names.common as common_name,
-        subtype,
-        ST_AREA(ST_GEOMFROMWKB(geometry)) as area_sq_degrees
-    FROM read_parquet('{divisions_url}', filename=true, hive_partitioning=1)
-    WHERE subtype = 'country' 
-    AND (
-        country ILIKE '%AF%' OR 
-        country ILIKE '%Afghanistan%' OR
-        names.primary ILIKE '%Afghanistan%' OR 
-        names.common ILIKE '%Afghanistan%'
-    )
-    ORDER BY area_sq_degrees DESC
-    LIMIT 10
-    """
 
 
 def validate_data_quality(gdf: gpd.GeoDataFrame, target_name: str, min_features: int = 100) -> bool:
@@ -430,9 +368,3 @@ def validate_data_quality(gdf: gpd.GeoDataFrame, target_name: str, min_features:
     return True
 
 
-def _load_aoi_wkt(aoi_path: str) -> str:
-    """Load area of interest geometry and convert to WKT format for spatial operations."""
-    gdf = gpd.read_file(Path(aoi_path)).to_crs(4326)
-    if gdf.empty:
-        raise ValueError(f"AOI is empty: {aoi_path}")
-    return gdf.unary_union.wkt
