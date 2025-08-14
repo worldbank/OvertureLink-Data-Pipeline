@@ -278,6 +278,31 @@ def process_target(
     start_time = datetime.now()
     logging.info(f"Initiating {mode} operation for {target_name} target")
     logging.info(f"Execution timestamp: {start_time}")
+    
+    # Log the original Python command for reproducibility
+    cmd_parts = ["python", "-m", "o2agol.cli", target_name, "-c", config]
+    if mode != "auto":
+        cmd_parts.extend(["--mode", mode])
+    if limit:
+        cmd_parts.extend(["--limit", str(limit)])
+    if iso2:
+        cmd_parts.extend(["--iso2", iso2])
+    if fast_bbox:
+        cmd_parts.append("--fast-bbox")
+    if exact:
+        cmd_parts.append("--exact")
+    if not use_divisions:
+        cmd_parts.append("--use-bbox")
+    if dry_run:
+        cmd_parts.append("--dry-run")
+    if verbose:
+        cmd_parts.append("--verbose")
+    if enable_file_logging:
+        cmd_parts.append("--log-to-file")
+    
+    command_str = " ".join(cmd_parts)
+    logging.info(f"Original command: {command_str}")
+    
     logging.info(f"Configuration file: {config}")
     logging.info(f"Feature limit: {limit or 'No limit (full dataset)'}")
     logging.info(f"Spatial filtering method: {'Overture Divisions' if use_divisions else 'Bounding Box'}")
@@ -337,15 +362,29 @@ def process_target(
         config_adapter = ConfigAdapter(cfg, selector, target_config, target_name)
         
         # Execute data retrieval with specified parameters
-        gdf = fetch_gdf(config_adapter, target_name, limit=limit, bbox_only=bbox_only, use_divisions=use_divisions)
-        logging.info(f"Data acquisition completed: {len(gdf):,} features retrieved")
+        data_result = fetch_gdf(config_adapter, target_name, limit=limit, bbox_only=bbox_only, use_divisions=use_divisions)
+        
+        # Handle dual query results (dict) vs single query (GeoDataFrame)
+        is_dual_query = isinstance(data_result, dict)
+        if is_dual_query:
+            total_features = sum(len(gdf) for gdf in data_result.values())
+            logging.info(f"Data acquisition completed: {total_features:,} features retrieved (dual query)")
+        else:
+            gdf = data_result
+            logging.info(f"Data acquisition completed: {len(gdf):,} features retrieved")
 
         # Execute dry run validation if requested
         if dry_run:
             logging.info("=" * 50)
             logging.info("DRY RUN VALIDATION MODE")
             logging.info("=" * 50)
-            logging.info(f"Target features for processing: {len(gdf):,}")
+            if is_dual_query:
+                logging.info(f"Target features for processing: {total_features:,} (places + buildings)")
+                for layer_name, layer_gdf in data_result.items():
+                    logging.info(f"  - {layer_name}: {len(layer_gdf):,} features")
+            else:
+                logging.info(f"Target features for processing: {len(gdf):,}")
+            
             # Get appropriate title for logging
             if cfg.get('config_format') == 'template':
                 template_metadata = cfg['template'].get_target_metadata(target_name)
@@ -368,8 +407,15 @@ def process_target(
         logging.info("SCHEMA NORMALIZATION PHASE")
         logging.info("=" * 50)
         
-        gdf = normalize_schema(gdf, target_name)
-        logging.info(f"Schema normalization completed: {len(gdf):,} features processed")
+        if is_dual_query:
+            # Normalize each layer separately
+            normalized_data = {}
+            for layer_name, layer_gdf in data_result.items():
+                normalized_data[layer_name] = normalize_schema(layer_gdf, target_name)
+                logging.info(f"Schema normalization completed for {layer_name}: {len(normalized_data[layer_name]):,} features")
+        else:
+            gdf = normalize_schema(gdf, target_name)
+            logging.info(f"Schema normalization completed: {len(gdf):,} features processed")
 
         logging.info("=" * 50)
         logging.info("DATA PUBLICATION PHASE")
@@ -404,7 +450,14 @@ def process_target(
                 'agol': type('AGOLConfig', (), target_config.get('agol', {}))()
             })()
         
-        result = publish_or_update(gdf, target_adapter, mode)
+        # Choose appropriate publishing method
+        if is_dual_query:
+            from .publish import publish_multi_layer_service
+            result = publish_multi_layer_service(normalized_data, target_adapter, mode)
+            total_published = sum(len(gdf) for gdf in normalized_data.values())
+        else:
+            result = publish_or_update(gdf, target_adapter, mode)
+            total_published = len(gdf)
         
         # Generate execution summary for audit and monitoring
         end_time = datetime.now()
@@ -414,10 +467,12 @@ def process_target(
         logging.info(f"{mode.upper()} OPERATION COMPLETED SUCCESSFULLY")
         logging.info("=" * 50)
         logging.info(f"Total execution time: {execution_duration}")
-        logging.info(f"Features processed: {len(gdf):,}")
+        logging.info(f"Features processed: {total_published:,}")
         logging.info(f"Target layer: {result.title}")
         logging.info(f"Item identifier: {result.itemid}")
         logging.info(f"Service URL: {result.homepage}")
+        if is_dual_query:
+            logging.info(f"Multi-layer service created with {len(normalized_data)} layers")
         logging.info("Operation completed successfully")
         
     except Exception as e:
@@ -442,7 +497,7 @@ def process_target(
 @app.command("roads")
 def roads(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
     fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
@@ -481,7 +536,7 @@ def roads(
 @app.command("buildings")
 def buildings(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
     fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
@@ -504,7 +559,7 @@ def buildings(
 @app.command("places")
 def places(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
     fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
@@ -527,7 +582,7 @@ def places(
 @app.command("education")
 def education(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
     fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
@@ -549,7 +604,7 @@ def education(
 @app.command("health")
 def health(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
     fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
@@ -571,7 +626,7 @@ def health(
 @app.command("markets")
 def markets(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: initial | overwrite | append")] = "initial",
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
     fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,

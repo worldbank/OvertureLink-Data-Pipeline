@@ -24,14 +24,14 @@ organization:
 
 # Global Content Templates (Using dynamic variables) You have to use HTML for it to appear correctly in AGOL.
 templates:
-  title: "{country_name} {sector_title}"
+  title: "{country_name} {sector_title} - Overture Maps"
   snippet: "{country_name} {sector_description} from Overture Maps."
   description: "
     {sector_title} data for {country_name} from Overture Maps {release} release.<br><br>
     <b>Data Type:</b> {data_type}<br>
     <b>Geographic Coverage:</b> {country_name} ({iso3})<br>
     <b>Source:</b> Overture Maps Foundation<br>
-    <b>Processing:</b> {organization} ETL Pipeline<br>
+    <b>Processing:</b> Overture to AGOL data pipeline. You can find the processing pipeline on GitHub <a href=\"https://github.com/worldbank/Overture-ArcGIS-Pipeline\" target=\"_blank\" rel=\"noopener noreferrer\">here</a>.<br>
     <b>Release Date:</b> {release}<br>
     <b>Update Frequency:</b> {update_frequency}<br><br>
     This dataset provides comprehensive {sector_description} information for {country_name}, processed through an automated data pipeline following organizational data standards.<br><br>
@@ -84,13 +84,14 @@ targets:
       
       # Technical Configuration
       upsert_key: "id"
-      item_id: "45e41c3c7b3e4c5692858522d2ae53f7"  # Existing layer
+      # item_id: "45e41c3c7b3e4c5692858522d2ae53f7"  # Existing layer
 
   education:
     # Data Selection  
     theme: places
     type: place
     filter: "categories.primary = 'education'"
+    building_filter: "class IN ('college', 'kindergarten', 'school', 'university')"
     
     # Sector-specific Variables
     sector_title: "Education Facilities"
@@ -107,13 +108,14 @@ targets:
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-      item_id: "426a65f299984d68a6c612f8054f9984"  # Created layer
+      # item_id: "426a65f299984d68a6c612f8054f9984"  # Created layer
 
   health:
     # Data Selection
     theme: places
     type: place
     filter: "categories.primary = 'health_and_medical'"
+    building_filter: "class IN ('medical', 'hospital')"
     
     # Sector-specific Variables
     sector_title: "Health Facilities"
@@ -137,9 +139,10 @@ targets:
     theme: places
     type: place
     filter: "categories.primary = 'retail'"
+    building_filter: "class IN ('commercial', 'retail', 'supermarket', 'kiosk')"
     
     # Sector-specific Variables
-    sector_title: "Marketplaces & Retail"
+    sector_title: "Marketplaces & Retail Facilities"
     sector_description: "commercial markets and retail facilities"
     sector_tag: "markets"
     data_type: "Commercial Infrastructure"

@@ -21,7 +21,7 @@ def normalize_schema(
         keep = [c for c in ["id", "names", "class", "subtype", "height", "num_floors"] if c in gdf.columns]
         
     elif layer in ["education", "health", "markets", "places"]:
-        # Places data - extract useful fields from complex JSON structures
+        # Mixed places and buildings data - handle unified schema
         keep = ["id"]
         
         # Extract primary name from names JSON
@@ -29,16 +29,23 @@ def normalize_schema(
             gdf["name"] = gdf["names"].apply(extract_primary_name)
             keep.append("name")
         
-        # Extract primary category from categories JSON
-        if "categories" in gdf.columns:
-            gdf["category"] = gdf["categories"].apply(extract_primary_category)
-            keep.append("category")
+        # Handle source_type field (distinguishes places vs buildings)
+        if "source_type" in gdf.columns:
+            keep.append("source_type")
         
-        # Keep confidence if available
+        # Create unified type_category field from places categories or building class
+        if "categories" in gdf.columns or "class" in gdf.columns:
+            gdf["type_category"] = gdf.apply(lambda row: 
+                extract_primary_category(row.get("categories")) if row.get("source_type") == "place" 
+                else row.get("class") if row.get("source_type") == "building" 
+                else None, axis=1)
+            keep.append("type_category")
+        
+        # Keep confidence if available (places only)
         if "confidence" in gdf.columns:
             keep.append("confidence")
         
-        # Extract contact information from complex fields
+        # Extract contact information from complex fields (places only)
         if "phones" in gdf.columns:
             gdf["phone"] = gdf["phones"].apply(extract_first_phone)
             keep.append("phone")
@@ -50,6 +57,14 @@ def normalize_schema(
         if "addresses" in gdf.columns:
             gdf["address"] = gdf["addresses"].apply(extract_formatted_address)
             keep.append("address")
+        
+        # Building-specific fields
+        if "height" in gdf.columns:
+            keep.append("height")
+        if "num_floors" in gdf.columns:
+            keep.append("num_floors")
+        if "subtype" in gdf.columns:
+            keep.append("subtype")
     
     else:
         # Default fallback

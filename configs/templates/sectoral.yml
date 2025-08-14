@@ -85,7 +85,7 @@ targets:
       
       # Technical Configuration
       upsert_key: "id"
-      item_id: "45e41c3c7b3e4c5692858522d2ae53f7"  # Existing layer
+      # item_id: " " 
 
   education:
     # Data Selection  
@@ -108,7 +108,7 @@ targets:
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-      item_id: "426a65f299984d68a6c612f8054f9984"  # Created layer
+      # item_id: " " 
 
   health:
     # Data Selection
@@ -131,7 +131,7 @@ targets:
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-      # item_id: "4a8198bf765f40cab70ebc88206d48ed"  # Old version - will create new one with better fields
+       # item_id: " "
 
   markets:
     # Data Selection
