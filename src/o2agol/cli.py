@@ -245,8 +245,6 @@ def process_target(
     mode: str,
     limit: Optional[int],
     iso2: Optional[str],
-    fast_bbox: bool,
-    exact: bool,
     dry_run: bool,
     verbose: bool,
     use_divisions: bool = True,
@@ -264,8 +262,6 @@ def process_target(
         mode: Processing mode (initial, overwrite, append)
         limit: Optional feature limit for testing and development
         iso2: ISO2 country code override
-        fast_bbox: Enable fast bounding box filtering
-        exact: Force precise spatial intersection
         dry_run: Execute validation without data publication
         verbose: Enable detailed logging output
         use_divisions: Use Overture Divisions for precise boundaries
@@ -287,10 +283,6 @@ def process_target(
         cmd_parts.extend(["--limit", str(limit)])
     if iso2:
         cmd_parts.extend(["--iso2", iso2])
-    if fast_bbox:
-        cmd_parts.append("--fast-bbox")
-    if exact:
-        cmd_parts.append("--exact")
     if not use_divisions:
         cmd_parts.append("--use-bbox")
     if dry_run:
@@ -308,8 +300,6 @@ def process_target(
     logging.info(f"Spatial filtering method: {'Overture Divisions' if use_divisions else 'Bounding Box'}")
     logging.info(f"Dry run mode: {dry_run}")
     
-    if fast_bbox and exact:
-        raise typer.BadParameter("Conflicting spatial options: use either --fast-bbox or --exact")
 
     # Load unified configuration
     cfg = load_pipeline_config(config)
@@ -333,7 +323,7 @@ def process_target(
         raise typer.Exit(1)
 
     # Configure spatial filtering methodology
-    bbox_only = fast_bbox or (not exact)
+    bbox_only = not use_divisions
     
     try:
         logging.info("=" * 50)
@@ -500,8 +490,6 @@ def roads(
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
-    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
-    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -514,8 +502,8 @@ def roads(
     for precise country boundary adherence. Default configuration uses fast 
     bounding box filtering optimized for development workflows.
     
-    Production deployments should utilize --exact flag for precise spatial 
-    intersection or --use-divisions for country boundary accuracy.
+    Production deployments should utilize --use-divisions for precise country 
+    boundary accuracy using Overture Divisions.
     
     Examples:
       Development testing:
@@ -525,12 +513,12 @@ def roads(
         python -m o2agol.cli roads -c configs/afg.yml --dry-run
       
       Production deployment:
-        python -m o2agol.cli roads -c configs/afg.yml --exact --log-to-file
-        
-      Divisions-based filtering:
         python -m o2agol.cli roads -c configs/afg.yml --use-divisions --log-to-file
+        
+      Development with bbox filtering:
+        python -m o2agol.cli roads -c configs/afg.yml --use-bbox --log-to-file
     """
-    process_target("roads", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+    process_target("roads", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
 
 
 @app.command("buildings")
@@ -539,8 +527,6 @@ def buildings(
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
-    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
-    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -553,7 +539,7 @@ def buildings(
     for precise country boundary adherence. Optimized for large-scale building
     datasets with enterprise-grade error handling and audit logging.
     """
-    process_target("buildings", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+    process_target("buildings", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
 
 
 @app.command("places")
@@ -562,8 +548,6 @@ def places(
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
-    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
-    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -576,7 +560,7 @@ def places(
     healthcare centers, commercial establishments, and other points of interest
     relevant to development and humanitarian operations.
     """
-    process_target("places", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+    process_target("places", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
 
 
 @app.command("education")
@@ -585,8 +569,6 @@ def education(
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
-    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
-    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -598,7 +580,7 @@ def education(
     Includes schools, colleges, universities, and other educational institutions
     filtered using Overture's education category hierarchy.
     """
-    process_target("education", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+    process_target("education", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
 
 
 @app.command("health")
@@ -607,8 +589,6 @@ def health(
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
-    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
-    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -620,7 +600,7 @@ def health(
     Includes hospitals, clinics, health centers, dental offices, and other medical
     facilities filtered using Overture's health_and_medical category hierarchy.
     """
-    process_target("health", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+    process_target("health", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
 
 
 @app.command("markets")
@@ -629,8 +609,6 @@ def markets(
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
-    fast_bbox: Annotated[bool, typer.Option("--fast-bbox", help="Enable fast bounding box filtering")] = False,
-    exact: Annotated[bool, typer.Option("--exact", help="Force precise spatial intersection")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -642,7 +620,7 @@ def markets(
     Includes marketplaces, grocery stores, shopping centers, and retail establishments
     filtered using Overture's retail and market category hierarchies.
     """
-    process_target("markets", config, mode, limit, iso2, fast_bbox, exact, dry_run, verbose, use_divisions, log_to_file)
+    process_target("markets", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
 
 
 @app.command("version")

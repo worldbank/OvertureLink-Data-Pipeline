@@ -606,6 +606,7 @@ def _update_existing_service(existing_service, combined_gdf, layer_data, gis: GI
             truncate_result = feature_layer.manager.truncate()
             if not truncate_result.get('success', False):
                 raise RuntimeError(f"Failed to clear existing data: {truncate_result}")
+            logging.info("Existing data cleared")
             
             # Determine which data to use based on layer geometry type
             if 'point' in layer_geom_type and combined_points is not None:
@@ -657,9 +658,13 @@ def _update_existing_service(existing_service, combined_gdf, layer_data, gis: GI
                 # Clear and update this layer
                 logging.info(f"Updating layer {layer_name} with {len(data_to_upload):,} features...")
                 
+                # Clear existing data before adding new data
+                logging.info(f"Clearing existing data from layer {layer_name}...")
                 truncate_result = layer.manager.truncate()
                 if not truncate_result.get('success', False):
                     logging.warning(f"Failed to clear layer {layer_name}: {truncate_result}")
+                else:
+                    logging.info(f"Existing data cleared from layer {layer_name}")
                 
                 # Upload new data using correct ArcGIS API pattern
                 try:

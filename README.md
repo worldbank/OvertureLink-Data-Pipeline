@@ -6,7 +6,7 @@ This is a cloud-native ETL pipine to extract Overture Maps data (such as roads, 
 ## Pipeline Overview
 - Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3. We did this so the user doesn't have to download anything.
 - Transform (`transform.py`): Normalize schema/geometry, retain stable Overture/GERS IDs, define/delete/add metadata fields.
-- Publish (`publish.py`): ArcGIS Python API `add().publish()` for first run; `overwrite()` for updates.
+- Publish (`publish.py`): ArcGIS Python API with smart detection - automatically creates new layers or updates existing ones with data and metadata.
 - Automation: GitHub Actions (manual + schedule). Secrets via GitHub Environments for elements such as AGOL authentification.
 
 ## Requirements
@@ -41,7 +41,7 @@ On macOS/Linux:
 - Or using module directly
    `python -m o2agol.cli roads --config configs/afg.yml --mode initial`
 
-Note: after your first upload, you can add the item ID to the config file for it to be updated. Future plans for this to be automated.
+Note: The pipeline automatically detects existing layers and updates them seamlessly using smart detection mode.
 
 ## Config
 `configs/<country>.yml` includes:
@@ -51,8 +51,8 @@ Note: after your first upload, you can add the item ID to the config file for it
 - `mode`: initial/overwrite/append.
 
 ### Clip modes
-- Box: bbox-only overlap. For development due to its speed. Use `--use-bbox` 
 - Overture Division Clip: geometric clip with `ST_Intersects`. Use `--use-divisions` for production (or neither flag, as it is default).
+- Box: bbox-only overlap. For development due to its speed. Use `--use-bbox` 
 
 ## Outputs in AGOL
 - Hosted Feature Layers (roads lines, buildings polygons).
@@ -73,21 +73,25 @@ There are sets of queries prebuilt that you can find in the configs folder but y
 #### Lines
 - `roads` - Transportation networks (all roads, not filtered). `theme: transportation`
 
-#### Points
-- `education` - Education facilities (schools, colleges, universities) `"categories.primary = 'education'"`
-- `markets` - Markets and retail establishments. `filter: "categories.primary = 'retail'"`
-- `health` - Health facilities (hospitals, clinics, health centers). `filter: "categories.primary = 'health_and_medical'"`
-- `places` - All points of interest (unfiltered)
+#### Points & Polygons (Multi-layer)
+- `education` - Education facilities. Creates multi-layer service with both geometry types.
+- `health` - Health facilities. Creates multi-layer service with both geometry types.
+- `markets` - Retail facilities. Creates multi-layer service with both geometry types.
 
-#### Polygons
-- `buildings` - Building footprints 
+#### Points Only
+- `places` - All points of interest (unfiltered places)
+
+#### Polygons Only
+- `buildings` - Building footprints (all building polygons) 
 
 ### Choosing config file
 - `-c configs/afg.yml` - points to your config file
 
 ### Modes
-- `--mode initial` - for when you first upload an AGOL content item (after copy ID to config file)
-- `--mode overwrite` - for when you update an AGOL content item
+- `--mode auto` (default) - Smart detection: automatically creates new layers or updates existing ones based on service name
+- `--mode initial` - Force creation of new layer (use when auto-detection fails)
+- `--mode overwrite` - Force update of existing layer (requires item_id in config)
+- `--mode append` - Add data to existing layer without clearing (requires item_id in config)
 
 ### Clipping
 - `--use-divisions` (default) - Uses Overture Divisions for precise boundaries
@@ -95,19 +99,25 @@ There are sets of queries prebuilt that you can find in the configs folder but y
 
 ### Other parameters
 - `--limit 1000` - Limits the features for testing purposes
-- `--log-to-file` - Logs generate in "/log" for debug purposes
-- `--dry-run` - Processes but doesn't publish to AGOL, good for testing without uploading every test.
+- `--verbose` / `-v` - Enable detailed debug logging output  
+- `--log-to-file` - Create timestamped log files in "/logs" directory
+- `--dry-run` - Processes but doesn't publish to AGOL, good for testing without uploading every test
+- `--iso2 XX` - Override country code from config (e.g. `--iso2 af` for Afghanistan)
 
 ## Examples:
 
-### Core Infrastructure
-- `o2agol roads -c configs/afg.yml --mode overwrite --use-bbox --log-to-file` - Updates the Afghanistan roads content item in AGOL using bbox parameters, also logs terminal to file.
-- `o2agol buildings -c configs/afg.yml --mode initial` - Creates a new buildings content item in AGOL for Afghanistan
+### Recommended Usage (Smart Detection)
+- `o2agol education -c configs/afg.yml --log-to-file` - Automatically creates or updates Afghanistan education facilities (multi-layer service with points + polygons)
+- `o2agol health -c configs/afg.yml --use-bbox --limit 1000` - Process health facilities using fast bbox filtering with 1000 feature limit for testing
+- `o2agol roads -c configs/afg.yml --verbose` - Process Afghanistan roads with detailed logging
 
-### Sectoral Facilities
-- `o2agol education -c configs/afg.yml --mode initial` - Creates a new education facilities layer for Afghanistan
-- `o2agol health -c configs/afg.yml --mode overwrite --use-bbox --limit 1000` - Updates health facilities using bbox filtering with 1000 feature limit for testing
-- `o2agol markets -c configs/afg.yml --mode initial --dry-run` - Validates market facilities configuration without publishing
+### Core Infrastructure  
+- `o2agol roads -c configs/afg.yml` - Process transportation networks (auto-detects new vs update)
+- `o2agol buildings -c configs/afg.yml --dry-run` - Validate buildings configuration without publishing
+
+### Advanced Usage
+- `o2agol markets -c configs/afg.yml --mode initial` - Force creation of new markets layer (override auto-detection)
+- `o2agol education -c configs/afg.yml --mode overwrite --iso2 pk` - Update education layer using Pakistan country code override
 
 ## CI/CD
 - `ci.yml`: lint, type-check, unit tests on PR/main.
