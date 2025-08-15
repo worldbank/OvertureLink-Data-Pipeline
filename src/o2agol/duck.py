@@ -29,28 +29,64 @@ def _parquet_url_from_config(overture_config: dict, theme: str, type_: str) -> s
 
 
 def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
-    """Configure DuckDB with performance optimizations for large-scale geospatial processing."""
+    """Configure DuckDB."""
     con = duckdb.connect()
     
     # Install required extensions
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute("INSTALL spatial; LOAD spatial;")
     
-    # S3 configuration using new config system
+    # Get project root directory for temp files
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    temp_dir = os.path.join(project_root, 'temp', 'duckdb')
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Advanced DuckDB configuration based on official performance guidelines
+    duckdb_settings = secure_config.get_duckdb_settings()
+    threads = duckdb_settings['threads']
+    
+    # Memory optimization: 1-4 GB per thread (DuckDB recommendation)
+    total_memory_gb = int(os.environ.get('DUCKDB_MEMORY_LIMIT', duckdb_settings['memory_limit']).replace('GB', ''))
+    memory_per_thread = max(1, min(4, total_memory_gb // threads))
+    optimized_memory = f"{memory_per_thread * threads}GB"
+    
+    # Core memory and threading configuration
+    con.execute(f"SET memory_limit='{optimized_memory}';")
+    con.execute(f"SET threads={threads};")
+    
+    # Temp directory configuration (use fast local storage)
+    con.execute(f"SET temp_directory='{temp_dir.replace(os.sep, '/')}';")
+    con.execute("SET max_temp_directory_size='50GB';")  # Reasonable limit for temp files
+    
+    # S3 and remote file optimizations (only use settings that exist)
     con.execute(f"SET s3_region='{secure_config.overture.s3_region}';")
     
-    # Get DuckDB settings from new config system
-    duckdb_settings = secure_config.get_duckdb_settings()
-    con.execute(f"SET memory_limit='{duckdb_settings['memory_limit']}';")
-    con.execute(f"SET threads={duckdb_settings['threads']};")
+    # HTTP connection optimizations
+    con.execute("SET http_timeout=1800000;")  # 30 minutes for large transfers
+    con.execute("SET http_retries=3;")
+    con.execute("SET http_keep_alive=true;")
     
-    # Extended timeout for long-distance network connections
-    con.execute("SET http_timeout=1800000;")  # 30 minutes
+    # Core performance optimizations (verified to exist)
+    con.execute("SET preserve_insertion_order=false;")  # Reduces memory usage for large datasets
     
-    # Enable progress reporting
+    # Query execution optimizations  
+    con.execute("SET enable_progress_bar=true;")
+    
+    # Only set these if they exist in this DuckDB version
+    try:
+        con.execute("SET enable_http_metadata_cache=true;")
+    except:
+        logging.debug("enable_http_metadata_cache not available in this DuckDB version")
+        
+    try:
+        con.execute("SET s3_url_compatibility_mode=false;")
+    except:
+        logging.debug("s3_url_compatibility_mode not available in this DuckDB version")
+    
+    # Set environment for progress reporting
     os.environ['DUCKDB_PROGRESS_BAR'] = '1'
     
-    logging.info(f"DuckDB configured: {duckdb_settings['threads']} threads, {duckdb_settings['memory_limit']} memory, extended timeouts")
+    logging.info(f"DuckDB configured (advanced): {threads} threads @ {memory_per_thread}GB each, temp: {temp_dir}")
     return con
 
 
@@ -244,9 +280,16 @@ def _fetch_dual_query(con: duckdb.DuckDBPyConnection, overture_config: dict, tar
 
 
 def _fetch_via_temp_file(con: duckdb.DuckDBPyConnection, sql: str) -> gpd.GeoDataFrame:
-    """Memory-efficient data processing using temporary file strategy."""
+    """Optimized data processing with Arrow, with a fallback to temp file strategy."""
     
-    # Create temporary file with proper cleanup handling
+    # First, try Arrow-based direct processing (much faster)
+    try:
+        logging.info("Attempting Arrow direct processing (optimized path)")
+        return _fetch_via_arrow(con, sql)
+    except Exception as arrow_err:
+        logging.warning(f"Arrow processing failed: {arrow_err}, falling back to temp file")
+    
+    # Fallback to original temp file approach
     with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp:
         temp_path = tmp.name
     
@@ -298,6 +341,52 @@ def _fetch_via_temp_file(con: duckdb.DuckDBPyConnection, sql: str) -> gpd.GeoDat
                     time.sleep(1)  # Wait before retry
 
 
+def _fetch_via_arrow(con: duckdb.DuckDBPyConnection, sql: str) -> gpd.GeoDataFrame:
+    """
+    Direct Arrow-based processing.
+    This is the primary optimization, created to avoid slow COPY TO operations.
+    """
+    start_time = time.time()
+    
+    # Modify query to include geometry as WKB in the result
+    arrow_sql = f"""
+    SELECT *, ST_AsWKB(geom) AS geometry_wkb
+    FROM ({sql})
+    """
+    
+    # Execute query and get Arrow result directly
+    result = con.execute(arrow_sql)
+    
+    # Try Arrow first (fastest)
+    try:
+        arrow_table = result.arrow()
+        df = arrow_table.to_pandas()
+        logging.info(f"Fetched {len(df):,} rows via Arrow in {time.time()-start_time:.1f}s")
+    except Exception as e:
+        # Fallback to fetchall if Arrow fails
+        logging.debug(f"Arrow conversion failed, using fetchall: {e}")
+        result = con.execute(arrow_sql)
+        df = pd.DataFrame(result.fetchall(), columns=[desc[0] for desc in result.description])
+        logging.info(f"Fetched {len(df):,} rows via fetchall in {time.time()-start_time:.1f}s")
+    
+    # Convert WKB geometry column to shapely geometries
+    if "geometry_wkb" in df.columns:
+        df["geometry"] = df["geometry_wkb"].apply(
+            lambda b: swkb.loads(bytes(b)) if b is not None else None
+        )
+        df = df.drop(columns=["geometry_wkb"])
+    
+    # Drop the original geom column if it exists
+    if "geom" in df.columns:
+        df = df.drop(columns=["geom"])
+    
+    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+    
+    elapsed = time.time() - start_time
+    logging.info(f"Arrow processing completed: {len(gdf):,} features in {elapsed:.1f}s")
+    return gdf
+
+
 def _get_columns_for_target_type(target_type: str) -> list[str]:
     """
     Get essential columns for a specific Overture data type.
@@ -323,8 +412,8 @@ def _get_columns_for_target_type(target_type: str) -> list[str]:
 
 def _build_divisions_query(overture_config: dict, target_name: str, target_config: dict, selector: dict, limit: int = None) -> str:
     """
-    Build query using Overture Divisions for precise country boundaries.
-    Uses unified Overture configuration from YAML.
+    Build query using Overture Divisions.
+    Uses Overture configuration from YAML.
     """
     target_type = target_config.get('type')
     target_theme = target_config.get('theme')
@@ -333,7 +422,7 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
     if not target_type or not target_theme:
         raise ValueError(f"Missing theme ({target_theme}) or type ({target_type}) in target configuration")
     
-    # Use centralized column selection logic
+    # Use centralized column selection logic (optimized for projection pushdown)
     columns = _get_columns_for_target_type(target_type)
     cols_sql = ", ".join(columns)
     
@@ -344,27 +433,41 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
     logging.info(f"Data URL: {data_url}")
     logging.info(f"Divisions URL: {divisions_url}")
     
-    # Simplified query - we know country='AF' works
+    # CRITICAL OPTIMIZATION: Always use bbox pre-filtering for spatial queries
+    bbox_filter = ""
+    if iso2 in COUNTRY_BBOXES:
+        xmin, ymin, xmax, ymax = COUNTRY_BBOXES[iso2]
+        bbox_buffer = 0.1  # Small buffer for edge cases
+        bbox_filter = f"""
+        AND d.bbox.xmin >= {xmin - bbox_buffer}
+        AND d.bbox.xmax <= {xmax + bbox_buffer}
+        AND d.bbox.ymin >= {ymin - bbox_buffer}
+        AND d.bbox.ymax <= {ymax + bbox_buffer}
+        """
+        logging.info(f"Using bbox pre-filter for {iso2}: ({xmin}, {ymin}, {xmax}, {ymax}) + {bbox_buffer} buffer")
+    else:
+        logging.warning(f"No bbox defined for {iso2} - spatial query may be slow")
+    
+    # Advanced optimized query with table aliases and explicit column projection
     sql = f"""
     WITH country_boundary AS (
         SELECT ST_GEOMFROMWKB(geometry) as country_geom
         FROM read_parquet('{divisions_url}', filename=true, hive_partitioning=1)
         WHERE subtype = 'country' AND country = '{iso2}'
         LIMIT 1
-    ),
-    filtered_data AS (
-        SELECT {cols_sql}, ST_GEOMFROMWKB(geometry) AS geom
-        FROM read_parquet('{data_url}', filename=true, hive_partitioning=1), country_boundary
-        WHERE ST_INTERSECTS(ST_GEOMFROMWKB(geometry), country_geom)
     )
-    SELECT {cols_sql}, geom
-    FROM filtered_data
+    SELECT {', '.join([f'd.{col}' for col in columns])}, ST_GEOMFROMWKB(d.geometry) AS geom
+    FROM read_parquet('{data_url}', filename=true, hive_partitioning=1) d
+    CROSS JOIN country_boundary cb
+    WHERE 1=1
+    {bbox_filter}
+    AND ST_INTERSECTS(ST_GEOMFROMWKB(d.geometry), cb.country_geom)
     """
     
     # Apply data-specific filters
     target_filter = target_config.get('filter')
     if target_filter:
-        sql += f" WHERE {target_filter}"
+        sql += f" AND {target_filter}"
     
     # Apply record limit for testing
     if limit:
@@ -376,28 +479,33 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
 def _build_optimized_query(parquet_url: str, xmin: float, ymin: float, xmax: float, ymax: float, 
                           target_config: dict, limit: int = None) -> str:
     """
-    Construct optimized SQL query with bounding box spatial filtering.
+    Construct highly optimized SQL query with bounding box spatial filtering and projection pushdown.
     """
     target_type = target_config.get('type')
     
-    # Use centralized column selection logic
+    # Use centralized column selection logic (enables projection pushdown)
     columns = _get_columns_for_target_type(target_type)
-    cols_sql = ", ".join(columns)
     
-    # Optimized query with early geometry type conversion
+    # Optimized query with explicit column selection and table alias
     sql = f"""
-    SELECT {cols_sql}, ST_GEOMFROMWKB(geometry) AS geom
-    FROM read_parquet('{parquet_url}', filename=true, hive_partitioning=1)
-    WHERE bbox.xmin >= {xmin}
-      AND bbox.xmax <= {xmax}
-      AND bbox.ymin >= {ymin}
-      AND bbox.ymax <= {ymax}
+    SELECT {', '.join([f'd.{col}' for col in columns])}, ST_GEOMFROMWKB(d.geometry) AS geom
+    FROM read_parquet('{parquet_url}', filename=true, hive_partitioning=1) d
+    WHERE d.bbox.xmin >= {xmin}
+      AND d.bbox.xmax <= {xmax}
+      AND d.bbox.ymin >= {ymin}
+      AND d.bbox.ymax <= {ymax}
     """
     
-    # Apply data-specific filters
+    # Apply data-specific filters with table alias
     target_filter = target_config.get('filter')
-    if target_filter and "class = 'primary'" not in target_filter:
-        sql += f" AND {target_filter}"
+    if target_filter:
+        # Add table alias to filter if not present
+        if 'd.' not in target_filter and not any(op in target_filter for op in ['=', '<', '>', 'IN', 'LIKE']):
+            # Simple column references - add alias
+            filter_with_alias = target_filter.replace('class', 'd.class').replace('subtype', 'd.subtype')
+            sql += f" AND {filter_with_alias}"
+        else:
+            sql += f" AND {target_filter}"
     
     # Apply record limit for testing and development workflows
     if limit:

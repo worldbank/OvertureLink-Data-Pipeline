@@ -13,8 +13,8 @@ def normalize_schema(
 
     # Handle different layer types with appropriate field selection
     if layer in ["roads"]:
-        # Transportation data
-        keep = [c for c in ["id", "class", "subtype", "names", "routes"] if c in gdf.columns]
+        # Transportation data - use original simple approach that worked. "names", "routes" had issues. To investigate.
+        keep = [c for c in ["id", "class", "subtype"] if c in gdf.columns]
         
     elif layer in ["buildings"]:
         # Building data  

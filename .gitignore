@@ -32,12 +32,14 @@ build/
 
 # Data / tmp
 .tmp/
+temp/
 logs/
-test_runs/
 *.geojson
 *.gpkg
 *.txt
 .ruff_cache/
 
-# Development and experimental features
+# Development, debugging and experimental features
 dev/
+tests/
+src/o2agol/debug.py

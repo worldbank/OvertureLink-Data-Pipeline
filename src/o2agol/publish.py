@@ -64,6 +64,9 @@ def _gdf_to_geojson_tempfile(gdf: gpd.GeoDataFrame) -> tempfile.NamedTemporaryFi
     """
     Convert GeoDataFrame to temporary GeoJSON file for ArcGIS Online upload.
     
+    Uses GeoPandas built-in GeoJSON export for consistent handling of all data types.
+    Creates temp files in project /temp directory to avoid system temp clutter.
+    
     Args:
         gdf: GeoDataFrame to convert
         
@@ -73,29 +76,26 @@ def _gdf_to_geojson_tempfile(gdf: gpd.GeoDataFrame) -> tempfile.NamedTemporaryFi
     Note:
         Caller is responsible for cleanup of temporary file
     """
-    # We'll iterate rows without the geometry column
-    attrs = gdf.drop(columns=["geometry"], errors="ignore")
-
-    features = []
-    for i, row in attrs.iterrows():
-        # row has no geometry; build properties directly
-        props = {k: (None if pd.isna(v) else v) for k, v in row.items()}
-
-        # use the geometry from the GeoDataFrame
-        geom = gdf.geometry.iat[i]
-        geom_json = geom.__geo_interface__ if geom is not None else None
-
-        features.append({
-            "type": "Feature",
-            "properties": props,
-            "geometry": geom_json,
-        })
-
-    fc = {"type": "FeatureCollection", "features": features}
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False, encoding="utf-8")
-    json.dump(fc, tmp)
-    tmp.flush()
-    return tmp
+    # Get project temp directory (same pattern as duck.py)
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    temp_dir = os.path.join(project_root, 'temp')
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Create temp file in project directory and close handle to avoid Windows file locking
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False, 
+                                     dir=temp_dir, encoding="utf-8")
+    tmp_name = tmp.name
+    tmp.close()  # Close handle before GeoPandas writes to avoid file locking on Windows
+    
+    # Use GeoPandas built-in GeoJSON export - handles all data types correctly
+    gdf.to_file(tmp_name, driver='GeoJSON')
+    
+    # Return compatible object with name attribute
+    class TempFile:
+        def __init__(self, name):
+            self.name = name
+    
+    return TempFile(tmp_name)
 
 
 def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
@@ -125,7 +125,7 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
     if mode == "auto":
         gis = _login_gis_for_publish()
         title = tgt.agol.item_title
-        existing_service = _find_existing_service(gis, title)
+        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None))
         if existing_service:
             logging.info(f"Smart detection: Found existing service '{title}' - using overwrite mode")
             mode = "overwrite"
@@ -170,23 +170,13 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
                 "tags": ",".join(tags),
             }
             
-            # Add enhanced metadata fields if available
-            if hasattr(tgt.agol, 'snippet') and tgt.agol.snippet:
-                item_properties["snippet"] = tgt.agol.snippet
-            else:
-                item_properties["snippet"] = f"Generated from Overture Maps pipeline - {len(gdf):,} features"
+            # Add template metadata fields 
+            item_properties["snippet"] = tgt.agol.snippet
+            item_properties["description"] = tgt.agol.description
             
-            if hasattr(tgt.agol, 'description') and tgt.agol.description:
-                item_properties["description"] = tgt.agol.description
-            else:
-                item_properties["description"] = f"Overture Maps data with {len(gdf):,} features"
-            
-            # Add ESRI enterprise metadata fields if available
-            if hasattr(tgt.agol, 'access_information') and tgt.agol.access_information:
-                item_properties["accessInformation"] = tgt.agol.access_information
-            
-            if hasattr(tgt.agol, 'license_info') and tgt.agol.license_info:
-                item_properties["licenseInfo"] = tgt.agol.license_info
+            # Add ESRI enterprise metadata fields
+            item_properties["accessInformation"] = tgt.agol.access_information
+            item_properties["licenseInfo"] = tgt.agol.license_info
             
             # Note: Removed categories, type_keywords, and custom properties 
             # as they require admin permissions and add unnecessary complexity
@@ -386,7 +376,7 @@ def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mo
     # Determine actual mode
     if mode == "auto":
         # Check if service already exists
-        existing_service = _find_existing_service(gis, title)
+        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None))
         if existing_service:
             logging.info(f"Found existing service '{title}' (ID: {existing_service.itemid})")
             return _update_existing_service(existing_service, combined_gdf, prepared_layers, gis, tgt)
@@ -397,7 +387,7 @@ def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mo
         logging.info(f"Creating new multi-layer service: {title}")
     
     elif mode == "overwrite":
-        existing_service = _find_existing_service(gis, title)
+        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None))
         if not existing_service:
             raise RuntimeError(f"Cannot overwrite - service '{title}' not found")
         return _update_existing_service(existing_service, combined_gdf, prepared_layers)
@@ -411,15 +401,15 @@ def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mo
             "type": "GeoJson",
             "title": title,
             "tags": ",".join(tags),
-            "description": f"Overture Maps data with {total_features:,} features",
-            "snippet": f"Multi-layer dataset - {', '.join([f'{k}: {len(v)}' for k, v in prepared_layers.items()])}"
+            "description": tgt.agol.description,
+            "snippet": tgt.agol.snippet
         }
         
         item = gis.content.add(item_properties, data=tmp.name)
         
         # Publish as feature service
         publish_params = {
-            'name': title.replace(' ', '_').replace('-', '_'),
+            'name': title.replace(' ', '_').replace('-', '_').replace('&', 'and'),
             'hasStaticData': True,
             'maxRecordCount': 2000,
             'layerInfo': {
@@ -442,28 +432,41 @@ def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mo
             pass
 
 
-def _find_existing_service(gis: GIS, title: str):
+def _find_existing_service(gis: GIS, title: str, item_id: str = None):
     """
-    Search for existing feature service by title and service name patterns.
+    Search for existing feature service by item_id first, then title and service name patterns.
     
-    AGOL converts titles to URL-safe service names, so we need to check both
-    the exact title and potential service name variations to avoid conflicts.
+    AGOL converts titles to URL-safe service names, so we need robust search logic
+    to handle title changes and service name conflicts.
     
     Args:
         gis: Authenticated GIS connection
-        title: Exact title to search for
+        title: Current title to search for
+        item_id: Specific item ID to look for (optional)
         
     Returns:
         Feature service item if found, None otherwise
     """
     try:
+        # Search 1: Direct item_id lookup (most reliable)
+        if item_id:
+            try:
+                service = gis.content.get(item_id)
+                if service and service.type == "Feature Service":
+                    logging.info(f"Found service by item_id '{item_id}': {service.title}")
+                    return service
+                else:
+                    logging.warning(f"Item {item_id} exists but is not a Feature Service (type: {service.type if service else 'None'})")
+            except Exception as e:
+                logging.warning(f"Failed to retrieve item by ID '{item_id}': {e}")
+        
         # Generate potential service name (AGOL URL-safe conversion)
-        service_name = title.replace(' ', '_').replace('-', '_').replace('.', '_')
+        service_name = title.replace(' ', '_').replace('-', '_').replace('.', '_').replace('&', 'and')
         # Remove multiple underscores and clean up
         import re
         service_name = re.sub(r'_+', '_', service_name).strip('_')
         
-        # Search 1: Exact title match
+        # Search 2: Exact title match
         title_query = f'title:"{title}" AND type:"Feature Service"'
         title_results = gis.content.search(
             query=title_query,
@@ -471,7 +474,7 @@ def _find_existing_service(gis: GIS, title: str):
             max_items=10
         )
         
-        # Search 2: Service name pattern match (broader search)
+        # Search 3: Service name pattern match (broader search)
         name_query = f'name:*{service_name}* AND type:"Feature Service"'
         name_results = gis.content.search(
             query=name_query,
@@ -479,8 +482,17 @@ def _find_existing_service(gis: GIS, title: str):
             max_items=20
         )
         
+        # Search 4: Fallback - search by owner and service name pattern
+        owner_query = f'owner:{gis.users.me.username} AND type:"Feature Service"'
+        owner_results = gis.content.search(
+            query=owner_query,
+            item_type="Feature Service",
+            max_items=50
+        )
+        
         # Combine and deduplicate results
         all_results = title_results + [item for item in name_results if item not in title_results]
+        all_results += [item for item in owner_results if item not in all_results]
         
         # Filter for exact title matches first
         exact_title_matches = [item for item in all_results if item.title == title]
@@ -494,16 +506,16 @@ def _find_existing_service(gis: GIS, title: str):
         for item in all_results:
             # Check if service name would conflict
             item_service_name = getattr(item, 'name', '') or getattr(item, 'url', '').split('/')[-1]
-            if service_name.lower() in item_service_name.lower():
+            if service_name.lower() in item_service_name.lower() or item_service_name.lower() in service_name.lower():
                 potential_conflicts.append(item)
         
         if potential_conflicts:
             conflict_service = potential_conflicts[0]
-            logging.info(f"Found potential service name conflict: '{conflict_service.title}' (ID: {conflict_service.itemid})")
-            logging.info(f"Service name pattern '{service_name}' matches existing service")
+            logging.info(f"Found service name match: '{conflict_service.title}' (ID: {conflict_service.itemid})")
+            logging.info(f"Service name pattern '{service_name}' matches existing service '{conflict_service.name if hasattr(conflict_service, 'name') else 'unknown'}'")
             return conflict_service
         
-        logging.info(f"No existing service found for '{title}' (checked title and service name patterns)")
+        logging.info(f"No existing service found for '{title}' (checked title, service name patterns, and owner services)")
         return None
             
     except Exception as e:
@@ -861,8 +873,7 @@ def _build_metadata_dict(tgt):
     """
     Build metadata dictionary from target configuration for item updates.
     
-    Extracts available metadata fields and filters out None/empty values
-    to avoid overwriting existing metadata with blanks.
+    Uses template-resolved metadata from YAML configuration.
     
     Args:
         tgt: Target configuration object with agol attributes
@@ -872,26 +883,19 @@ def _build_metadata_dict(tgt):
     """
     metadata = {}
     
-    # Core metadata fields
-    if hasattr(tgt.agol, 'snippet') and tgt.agol.snippet:
-        metadata['snippet'] = tgt.agol.snippet
+    # Core template metadata fields
+    metadata['snippet'] = tgt.agol.snippet
+    metadata['description'] = tgt.agol.description
     
-    if hasattr(tgt.agol, 'description') and tgt.agol.description:
-        metadata['description'] = tgt.agol.description
-    
-    if hasattr(tgt.agol, 'tags') and tgt.agol.tags:
-        # Handle both list and string formats
-        if isinstance(tgt.agol.tags, list):
-            metadata['tags'] = ','.join(tgt.agol.tags)
-        else:
-            metadata['tags'] = tgt.agol.tags
+    # Handle tags (both list and string formats)
+    if isinstance(tgt.agol.tags, list):
+        metadata['tags'] = ','.join(tgt.agol.tags)
+    else:
+        metadata['tags'] = tgt.agol.tags
     
     # Enterprise metadata fields
-    if hasattr(tgt.agol, 'license_info') and tgt.agol.license_info:
-        metadata['licenseInfo'] = tgt.agol.license_info
-    
-    if hasattr(tgt.agol, 'access_information') and tgt.agol.access_information:
-        metadata['accessInformation'] = tgt.agol.access_information
+    metadata['licenseInfo'] = tgt.agol.license_info
+    metadata['accessInformation'] = tgt.agol.access_information
     
     return metadata
 

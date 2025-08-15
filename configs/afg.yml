@@ -12,7 +12,7 @@ country:
 overture:
   base_url: "s3://overturemaps-us-west-2/release"
   s3_region: "us-west-2"
-  release: "2024-11-13.0"
+  release: "2025-07-23.0"
 
 # Organization Metadata Templates
 organization:
@@ -24,7 +24,7 @@ organization:
 
 # Global Content Templates (Using dynamic variables) You have to use HTML for it to appear correctly in AGOL.
 templates:
-  title: "{country_name} {sector_title} - Overture Maps"
+  title: "{country_name} {sector_title} Overture Maps"
   snippet: "{country_name} {sector_description} from Overture Maps."
   description: "
     {sector_title} data for {country_name} from Overture Maps {release} release.<br><br>
@@ -44,7 +44,7 @@ templates:
   license_info: "{license}<br>
     © Overture Maps Foundation and contributors. Licensed under CDLA‑Permissive‑2.0.<br> 
     Some Overture themes may include third‑party sources with additional attribution or terms. <br>
-    World Bank processing and value‑added metadata © {current_year} International Bank for Reconstruction and Development / The World Bank.<br>
+    World Bank processing and value‑added metadata© International Bank for Reconstruction and Development / The World Bank.<br>
     "
   # Base tags template: ISO3 + sector + source + year + organization tags
   tags_base: ["{iso3}", "overture maps", "public"]
@@ -108,7 +108,7 @@ targets:
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-      # item_id: "426a65f299984d68a6c612f8054f9984"  # Created layer
+      item_id: "086d9e5af73349cfac6324595ee7b20f"  # Existing layer
 
   health:
     # Data Selection
@@ -138,11 +138,11 @@ targets:
     # Data Selection
     theme: places
     type: place
-    filter: "categories.primary = 'retail'"
+    filter: "categories.primary IN ('retail', 'shopping', 'food_and_drink')"
     building_filter: "class IN ('commercial', 'retail', 'supermarket', 'kiosk')"
     
     # Sector-specific Variables
-    sector_title: "Marketplaces & Retail Facilities"
+    sector_title: "Marketplaces"
     sector_description: "commercial markets and retail facilities"
     sector_tag: "markets"
     data_type: "Commercial Infrastructure"

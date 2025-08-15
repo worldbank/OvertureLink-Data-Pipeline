@@ -4,7 +4,7 @@
 This is a cloud-native ETL pipine to extract Overture Maps data (such as roads, buildings), transform to an AGOL-ready schema, and publish as a feature layer in ArcGIS Online. This is designed to align with Overture's monthly releases and for country-specific data pulls.
 
 ## Pipeline Overview
-- Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3. We did this so the user doesn't have to download anything.
+- Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3 with optimized spatial queries and Arrow processing for fast data access.
 - Transform (`transform.py`): Normalize schema/geometry, retain stable Overture/GERS IDs, define/delete/add metadata fields.
 - Publish (`publish.py`): ArcGIS Python API with smart detection - automatically creates new layers or updates existing ones with data and metadata.
 - Automation: GitHub Actions (manual + schedule). Secrets via GitHub Environments for elements such as AGOL authentification.
@@ -16,12 +16,12 @@ This is a cloud-native ETL pipine to extract Overture Maps data (such as roads, 
 ## Setup for Local Use
 
 ### 1. Create Virtual Environment
-Create virtual environment
+Create virtual environment (optional, but recommended)
 `python -m venv .venv`
 
 Activate virtual environment
 On Windows:
-`.\.venv\Scripts\Activate.ps1`
+`.venv\Scripts\Activate.ps1`
 
 On macOS/Linux:
 `source .venv/bin/activate`
@@ -41,34 +41,27 @@ On macOS/Linux:
 - Or using module directly
    `python -m o2agol.cli roads --config configs/afg.yml --mode initial`
 
-Note: The pipeline automatically detects existing layers and updates them seamlessly using smart detection mode.
+Note: The pipeline automatically detects existing layers and updates them.
 
 ## Config
 `configs/<country>.yml` includes:
 - `overture_release`: "latest" or a specific date.
 - `selector`: Add ISO2 country code 
-- `targets`: roads/buildings with layer titles, item IDs (for updates), filters.
+- `targets`: roads/buildings with layer titles, item IDs (for updates if needed), filters.
 - `mode`: initial/overwrite/append.
 
 ### Clip modes
-- Overture Division Clip: geometric clip with `ST_Intersects`. Use `--use-divisions` for production (or neither flag, as it is default).
-- Box: bbox-only overlap. For development due to its speed. Use `--use-bbox` 
+- Overture Division Clip: precise geometric clip with `ST_Intersects` and bbox pre-filtering for optimal performance. Use `--use-divisions` for production (default).
+- Box: bbox-only overlap for fastest processing. Use `--use-bbox` for development and testing.
 
 ## Outputs in AGOL
 - Hosted Feature Layers (roads lines, buildings polygons).
 - Metadata based on config
 
-## Planned Improvements
-- Automatically add item ID to config for update.
-- Using bbox to query before division clip for optimization.
-- Option for full dump for multiple uploads.
-- Schema mismatch on append: ensure `id` key matches.
-- Large export: chunk export by grid; raise `maxRecordCount`.
-
 ## List of options
 
 ### Choosing query
-There are sets of queries prebuilt that you can find in the configs folder but you can create your own. 
+There are sets of queries prebuilt that you can find in the configs file but you can create your own. 
 
 #### Lines
 - `roads` - Transportation networks (all roads, not filtered). `theme: transportation`
@@ -94,8 +87,8 @@ There are sets of queries prebuilt that you can find in the configs folder but y
 - `--mode append` - Add data to existing layer without clearing (requires item_id in config)
 
 ### Clipping
-- `--use-divisions` (default) - Uses Overture Divisions for precise boundaries
-- `--use-bbox` - Takes the bbox without clipping on the admin boundaries. This is much faster than clipping along the borders of the country polygon. 
+- `--use-divisions` (default) - Uses Overture Divisions for precise boundaries with bbox pre-filtering for optimal performance
+- `--use-bbox` - Fast bbox-only filtering for development and testing
 
 ### Other parameters
 - `--limit 1000` - Limits the features for testing purposes
@@ -106,18 +99,10 @@ There are sets of queries prebuilt that you can find in the configs folder but y
 
 ## Examples:
 
-### Recommended Usage (Smart Detection)
+- `o2agol roads -c configs/afg.yml` - Process road networks (auto-detects new vs update)
 - `o2agol education -c configs/afg.yml --log-to-file` - Automatically creates or updates Afghanistan education facilities (multi-layer service with points + polygons)
 - `o2agol health -c configs/afg.yml --use-bbox --limit 1000` - Process health facilities using fast bbox filtering with 1000 feature limit for testing
-- `o2agol roads -c configs/afg.yml --verbose` - Process Afghanistan roads with detailed logging
-
-### Core Infrastructure  
-- `o2agol roads -c configs/afg.yml` - Process transportation networks (auto-detects new vs update)
-- `o2agol buildings -c configs/afg.yml --dry-run` - Validate buildings configuration without publishing
-
-### Advanced Usage
-- `o2agol markets -c configs/afg.yml --mode initial` - Force creation of new markets layer (override auto-detection)
-- `o2agol education -c configs/afg.yml --mode overwrite --iso2 pk` - Update education layer using Pakistan country code override
+- `o2agol roads -c configs/afg.yml --verbose --dryrun` - Process Afghanistan roads with detailed logging. It does everything but uploads to AGOL. Great for dev and checking data.
 
 ## CI/CD
 - `ci.yml`: lint, type-check, unit tests on PR/main.
@@ -127,4 +112,4 @@ There are sets of queries prebuilt that you can find in the configs folder but y
 - Overture documentation: https://docs.overturemaps.org/guides/divisions/
 - Mark Litwintschik's post on using DuckDB: https://tech.marksblogg.com/duckdb-gis-spatial-extension.html
 - Chris Holme's excellent tutoral here: https://github.com/cholmes/duckdb-geoparquet-tutorials/tree/main
-- This post on spatial clipping: https://geo.rocks/post/duckdb_geospatial/
+- Georock's post on spatial clipping: https://geo.rocks/post/duckdb_geospatial/
