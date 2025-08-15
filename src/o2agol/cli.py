@@ -421,6 +421,7 @@ def process_target(
                 'item_title': template_metadata.item_title,
                 'snippet': template_metadata.snippet,
                 'description': template_metadata.description,
+                'service_name': template_metadata.service_name,
                 'tags': template_metadata.tags,
                 'access_information': template_metadata.access_information,
                 'license_info': template_metadata.license_info,

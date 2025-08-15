@@ -41,6 +41,7 @@ class TargetMetadata:
     item_title: str
     snippet: str
     description: str
+    service_name: str
     tags: List[str]
     
     # Essential metadata fields
@@ -306,12 +307,23 @@ class TemplateConfigParser:
             # Direct template string
             resolved_description = self._resolve_template_string(raw_description, variables)
         
+        # For service_name, check if it references {service_name} template
+        raw_service_name = agol_config.get('service_name', '{service_name}')
+        if raw_service_name == '{service_name}':
+            # Use the service_name template
+            service_name_template = self.templates.get('service_name', '{iso3}_{sector_tag}')
+            resolved_service_name = self._resolve_template_string(service_name_template, variables)
+        else:
+            # Direct template string
+            resolved_service_name = self._resolve_template_string(raw_service_name, variables)
+        
         # Resolve all template fields
         metadata = TargetMetadata(
             # Core fields
             item_title=resolved_title,
             snippet=resolved_snippet,
             description=resolved_description,
+            service_name=resolved_service_name,
             
             # Tags with complex resolution
             tags=self._resolve_tags(agol_config.get('tags', []), variables),

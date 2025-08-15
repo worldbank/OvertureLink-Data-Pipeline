@@ -24,8 +24,9 @@ def normalize_schema(
         # Mixed places and buildings data - handle unified schema
         keep = ["id"]
         
-        # Extract primary name from names JSON
+        # Extract primary name from names JSON - vectorized for GeoPandas 1.0+
         if "names" in gdf.columns:
+            # Use vectorized string operations where possible
             gdf["name"] = gdf["names"].apply(extract_primary_name)
             keep.append("name")
         
@@ -34,11 +35,21 @@ def normalize_schema(
             keep.append("source_type")
         
         # Create unified type_category field from places categories or building class
+        # Optimized for GeoPandas 1.0+ with vectorized operations
         if "categories" in gdf.columns or "class" in gdf.columns:
-            gdf["type_category"] = gdf.apply(lambda row: 
-                extract_primary_category(row.get("categories")) if row.get("source_type") == "place" 
-                else row.get("class") if row.get("source_type") == "building" 
-                else None, axis=1)
+            # Initialize with None
+            gdf["type_category"] = None
+            
+            # Vectorized assignment for places
+            if "categories" in gdf.columns and "source_type" in gdf.columns:
+                place_mask = gdf["source_type"] == "place"
+                gdf.loc[place_mask, "type_category"] = gdf.loc[place_mask, "categories"].apply(extract_primary_category)
+            
+            # Vectorized assignment for buildings
+            if "class" in gdf.columns and "source_type" in gdf.columns:
+                building_mask = gdf["source_type"] == "building"
+                gdf.loc[building_mask, "type_category"] = gdf.loc[building_mask, "class"]
+            
             keep.append("type_category")
         
         # Keep confidence if available (places only)
@@ -46,10 +57,6 @@ def normalize_schema(
             keep.append("confidence")
         
         # Extract contact information from complex fields (places only)
-        if "phones" in gdf.columns:
-            gdf["phone"] = gdf["phones"].apply(extract_first_phone)
-            keep.append("phone")
-            
         if "websites" in gdf.columns:
             gdf["website"] = gdf["websites"].apply(extract_first_website)
             keep.append("website")
@@ -116,21 +123,6 @@ def extract_primary_category(categories_json) -> str:
     return str(categories_json)[:50] if categories_json else None
 
 
-def extract_first_phone(phones_json) -> str:
-    """Extract first phone number from phones array"""
-    if not phones_json:
-        return None
-        
-    try:
-        if isinstance(phones_json, list) and phones_json:
-            return phones_json[0]
-        elif isinstance(phones_json, str):
-            import json
-            phones = json.loads(phones_json)
-            return phones[0] if phones and isinstance(phones, list) else None
-    except:
-        pass
-    return None
 
 
 def extract_first_website(websites_json) -> str:

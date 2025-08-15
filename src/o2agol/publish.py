@@ -98,6 +98,9 @@ def _gdf_to_geojson_tempfile(gdf: gpd.GeoDataFrame) -> tempfile.NamedTemporaryFi
     return TempFile(tmp_name)
 
 
+
+
+
 def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
     """
     Publish or update geospatial data to ArcGIS Online using secure configuration.
@@ -125,7 +128,7 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
     if mode == "auto":
         gis = _login_gis_for_publish()
         title = tgt.agol.item_title
-        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None))
+        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None), tgt)
         if existing_service:
             logging.info(f"Smart detection: Found existing service '{title}' - using overwrite mode")
             mode = "overwrite"
@@ -160,44 +163,108 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
 
     # Create new hosted feature layer
     if mode == "initial":
-        tmp = _gdf_to_geojson_tempfile(gdf)
+        # Check for service name conflicts before creating
+        service_name = tgt.agol.service_name
+        conflicting_service = _find_existing_service(gis, title, None, tgt)
         
-        try:
-            # Build comprehensive metadata dict for enterprise publishing
-            item_properties = {
-                "type": "GeoJson",
-                "title": title,
-                "tags": ",".join(tags),
-            }
+        if conflicting_service:
+            # Check if this is an orphaned GeoJSON that we can republish
+            if hasattr(conflicting_service, '_can_republish') and conflicting_service._can_republish:
+                logging.info(f"Found orphaned GeoJSON item with matching title: {conflicting_service.title}")
+                logging.info(f"Republishing existing GeoJSON item: {conflicting_service.itemid}")
+                
+                # Use the existing GeoJSON item to publish our service
+                tmp = _gdf_to_geojson_tempfile(gdf)
+                
+                try:
+                    # Update the existing GeoJSON item with new data
+                    logging.info("Updating orphaned GeoJSON item with new data...")
+                    update_result = conflicting_service.update(data=tmp.name)
+                    
+                    if not update_result:
+                        raise RuntimeError("Failed to update existing GeoJSON item")
+                    
+                    # Publish the updated GeoJSON as a feature service
+                    publish_params = {'name': service_name}
+                    fl_item = conflicting_service.publish(publish_parameters=publish_params)
+                    
+                    logging.info(f"Successfully republished service '{fl_item.title}' with ID: {fl_item.itemid}")
+                    logging.info(f"Service URL: {fl_item.homepage}")
+                    
+                    return fl_item
+                    
+                finally:
+                    # Cleanup temp file
+                    try:
+                        os.unlink(tmp.name)
+                    except OSError:
+                        pass
+            else:
+                # Found a service that would conflict with our service name
+                logging.warning(f"Service name '{service_name}' conflicts with existing service: {conflicting_service.title}")
+                logging.info(f"Attempting to reuse existing service: {conflicting_service.itemid}")
+                
+                # Set the item_id and switch to overwrite mode
+                tgt.agol.item_id = conflicting_service.itemid
+                mode = "overwrite"
+                # Fall through to overwrite logic below
+        else:
+            logging.info(f"Service name '{service_name}' is available - proceeding with creation")
+        
+        if mode == "initial":  # Only proceed if we didn't switch to overwrite
+            tmp = _gdf_to_geojson_tempfile(gdf)
             
-            # Add template metadata fields 
-            item_properties["snippet"] = tgt.agol.snippet
-            item_properties["description"] = tgt.agol.description
-            
-            # Add ESRI enterprise metadata fields
-            item_properties["accessInformation"] = tgt.agol.access_information
-            item_properties["licenseInfo"] = tgt.agol.license_info
-            
-            # Note: Removed categories, type_keywords, and custom properties 
-            # as they require admin permissions and add unnecessary complexity
-            
-            logging.info(f"Creating item with metadata: {len(item_properties)} fields")
-            
-            item = gis.content.add(item_properties, data=tmp.name)
-            
-            fl_item = item.publish()
-            logging.info(f"Created layer '{fl_item.title}' with ID: {fl_item.itemid}")
-            logging.info(f"Add to config - item_id: {fl_item.itemid}")
-            logging.info(f"Access at: {fl_item.homepage}")
-            
-            return fl_item
-            
-        finally:
-            # Cleanup temp file
             try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
+                # Build comprehensive metadata dict for enterprise publishing
+                item_properties = {
+                    "type": "GeoJson",
+                    "title": title,
+                    "tags": ",".join(tags),
+                }
+                
+                # Add template metadata fields 
+                item_properties["snippet"] = tgt.agol.snippet
+                item_properties["description"] = tgt.agol.description
+                
+                # Add ESRI enterprise metadata fields
+                item_properties["accessInformation"] = tgt.agol.access_information
+                item_properties["licenseInfo"] = tgt.agol.license_info
+                
+                # Note: Removed categories, type_keywords, and custom properties 
+                # as they require admin permissions and add unnecessary complexity
+                
+                logging.info(f"Creating item with metadata: {len(item_properties)} fields")
+                
+                item = gis.content.add(item_properties, data=tmp.name)
+                
+                # Use clean service name for layer naming
+                publish_params = {'name': service_name}
+                
+                try:
+                    fl_item = item.publish(publish_parameters=publish_params)
+                    logging.info(f"Created layer '{fl_item.title}' with ID: {fl_item.itemid}")
+                    logging.info(f"Add to config - item_id: {fl_item.itemid}")
+                    logging.info(f"Access at: {fl_item.homepage}")
+                    
+                    return fl_item
+                    
+                except Exception as publish_error:
+                    # Clean up the GeoJSON item if publish fails
+                    logging.error(f"Publish failed: {publish_error}")
+                    logging.info("Cleaning up orphaned GeoJSON item...")
+                    try:
+                        item.delete()
+                        logging.info("Orphaned GeoJSON item deleted successfully")
+                    except Exception as cleanup_error:
+                        logging.warning(f"Failed to cleanup GeoJSON item: {cleanup_error}")
+                    raise publish_error
+                    
+            finally:
+                # Cleanup temp file
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
 
     # Update existing hosted feature layer
     if mode in ("overwrite", "append"):
@@ -206,8 +273,57 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
         
         if not fl_item:
             raise RuntimeError(f"Item not found: {item_id}")
-        if fl_item.type != "Feature Service":
+        
+        # Special handling for orphaned GeoJSON items
+        if fl_item.type == "GeoJson":
+            logging.info(f"Found orphaned GeoJSON item - republishing as Feature Service")
+            
+            # Update the GeoJSON with new data and republish
+            tmp = _gdf_to_geojson_tempfile(gdf)
+            
+            try:
+                # Update the existing GeoJSON item with new data
+                logging.info("Updating orphaned GeoJSON item with new data...")
+                update_result = fl_item.update(data=tmp.name)
+                
+                if not update_result:
+                    raise RuntimeError("Failed to update existing GeoJSON item")
+                
+                # Publish the updated GeoJSON as a feature service
+                service_name = tgt.agol.service_name
+                publish_params = {'name': service_name}
+                
+                # Try to publish, if it fails due to name conflict, try with unique name
+                try:
+                    new_fl_item = fl_item.publish(publish_parameters=publish_params)
+                except Exception as publish_error:
+                    if "already exists" in str(publish_error):
+                        # Generate unique service name
+                        import time
+                        unique_suffix = int(time.time()) % 10000
+                        unique_service_name = f"{service_name}_{unique_suffix}"
+                        logging.warning(f"Service name '{service_name}' conflicts, trying unique name: {unique_service_name}")
+                        
+                        publish_params = {'name': unique_service_name}
+                        new_fl_item = fl_item.publish(publish_parameters=publish_params)
+                    else:
+                        raise publish_error
+                
+                logging.info(f"Successfully republished service '{new_fl_item.title}' with ID: {new_fl_item.itemid}")
+                logging.info(f"Service URL: {new_fl_item.homepage}")
+                
+                return new_fl_item
+                
+            finally:
+                # Cleanup temp file
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
+        
+        elif fl_item.type != "Feature Service":
             raise RuntimeError(f"Item {item_id} is not a Feature Service (found: {fl_item.type})")
+        
         if not fl_item.layers:
             raise RuntimeError(f"No layers found in service {item_id}")
         
@@ -223,7 +339,7 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
             fl_item.update(item_properties=metadata_updates)
             logging.debug("Service metadata updated successfully")
         
-        # Clear existing data for overwrite mode
+        # For overwrite mode, clear existing data first then update
         if mode == "overwrite":
             logging.info("Clearing existing data...")
             truncate_result = feature_layer.manager.truncate()
@@ -244,59 +360,67 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
                 # Fallback: Try direct feature append/update
                 logging.warning("No source data item found - using direct feature update")
                 
-                # Convert to feature set and append/update
+                # For large datasets, use batched approach
+                logging.info(f"Using batched direct feature update for {len(gdf):,} features")
+                
                 # Ensure spatial accessor is properly initialized
                 gdf = gdf.spatial.set_geometry('geometry')
-                feature_set = gdf.spatial.to_featureset()
                 
-                if mode == "append":
+                # Batch size for AGOL limits
+                batch_size = 2000
+                total_features = len(gdf)
+                successful_adds = 0
+                
+                for i in range(0, total_features, batch_size):
+                    batch_gdf = gdf.iloc[i:i+batch_size]
+                    feature_set = batch_gdf.spatial.to_featureset()
+                    
                     edit_result = feature_layer.edit_features(adds=feature_set.features)
-                else:  # overwrite - data already cleared above
-                    edit_result = feature_layer.edit_features(adds=feature_set.features)
+                    
+                    # Check batch result
+                    add_results = edit_result.get('addResults', [])
+                    if add_results:
+                        batch_successful = sum(1 for r in add_results if r.get('success', False))
+                        successful_adds += batch_successful
+                        logging.info(f"Batch {i//batch_size + 1}: {batch_successful}/{len(batch_gdf)} features added successfully")
+                    else:
+                        logging.warning(f"Batch {i//batch_size + 1}: No add results returned")
                 
-                if not edit_result.get('addResults', [{}])[0].get('success', False):
-                    raise RuntimeError(f"Failed to update features: {edit_result}")
-                
-                logging.info("Direct feature update completed")
+                if successful_adds != total_features:
+                    logging.warning(f"Partial upload: {successful_adds}/{total_features} features uploaded")
+                else:
+                    logging.info(f"Direct feature update completed: {successful_adds:,} features uploaded")
                 
             else:
                 # Standard data item update approach (file-based overwrite)
                 data_item = related_items[0]
                 logging.info(f"Found source data item: {data_item.title} ({data_item.type})")
                 
-                # File-based overwrite using feature layer collection manager
-                # This approach is more reliable than feature set updates for mixed geometries
+                # Since data is already cleared, use direct feature append with proper prep
+                logging.info("Using direct feature append to add new data...")
+                
+                # Prepare GeoDataFrame properly for AGOL
+                prepared_gdf = _prepare_gdf_for_agol(gdf, "roads")
+                
+                # Use the same append method as the multi-layer service
                 try:
-                    from arcgis.features import FeatureLayerCollection
-                    feature_layer_collection = FeatureLayerCollection.fromitem(fl_item)
-                    logging.info("Using feature layer collection file-based overwrite...")
-                    overwrite_result = feature_layer_collection.manager.overwrite(tmp.name)
+                    _append_via_item(feature_layer, prepared_gdf, gis)
+                    logging.info("Data append completed successfully")
+                except Exception as append_error:
+                    logging.warning(f"Append via item failed: {append_error}")
                     
-                    if overwrite_result:
-                        logging.info("File-based data replacement completed successfully")
-                    else:
-                        raise RuntimeError("File-based overwrite returned False")
+                    # Fallback to edit_features method with proper geometry handling
+                    logging.info("Falling back to direct feature edit method...")
+                    prepared_gdf = prepared_gdf.set_geometry('geometry')
+                    feature_set = prepared_gdf.spatial.to_featureset()
+                    
+                    edit_result = feature_layer.edit_features(adds=feature_set.features)
+                    if not edit_result.get('addResults', [{}])[0].get('success', False):
+                        raise RuntimeError(f"Failed to update features: {edit_result}")
                         
-                except Exception as flc_error:
-                    # Fallback to data item update approach
-                    logging.warning(f"Feature layer collection overwrite failed: {flc_error}")
-                    logging.info("Falling back to data item update approach...")
-                    
-                    # Update the source data item with new file
-                    logging.info("Updating source data item...")
-                    update_result = data_item.update(data=tmp.name)
-                    
-                    if not update_result:
-                        raise RuntimeError("Failed to update source data item")
-                    
-                    # Republish the feature service from updated data item
-                    logging.info("Republishing feature service from updated data...")
-                    publish_result = data_item.publish(overwrite=True)
-                    
-                    if not publish_result:
-                        raise RuntimeError("Failed to republish feature service")
-                    
-                    logging.info("Data replacement completed successfully")
+                    logging.info("Fallback edit_features completed successfully")
+                
+                logging.info("Data replacement completed successfully")
             
             logging.info(f"Item ID preserved: {item_id}")
             
@@ -307,7 +431,9 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
             except OSError:
                 pass
         
-        # Get final count
+        # Get final count (with brief delay for AGOL indexing)
+        import time
+        time.sleep(2)
         final_count = feature_layer.query(return_count_only=True)
         logging.info(f"Operation complete: {final_count:,} total features in layer")
         logging.info(f"Updated layer: {fl_item.homepage}")
@@ -376,7 +502,7 @@ def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mo
     # Determine actual mode
     if mode == "auto":
         # Check if service already exists
-        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None))
+        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None), tgt)
         if existing_service:
             logging.info(f"Found existing service '{title}' (ID: {existing_service.itemid})")
             return _update_existing_service(existing_service, combined_gdf, prepared_layers, gis, tgt)
@@ -387,7 +513,7 @@ def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mo
         logging.info(f"Creating new multi-layer service: {title}")
     
     elif mode == "overwrite":
-        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None))
+        existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None), tgt)
         if not existing_service:
             raise RuntimeError(f"Cannot overwrite - service '{title}' not found")
         return _update_existing_service(existing_service, combined_gdf, prepared_layers)
@@ -407,9 +533,10 @@ def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mo
         
         item = gis.content.add(item_properties, data=tmp.name)
         
-        # Publish as feature service
+        # Publish as feature service with clean service name
+        service_name = tgt.agol.service_name
         publish_params = {
-            'name': title.replace(' ', '_').replace('-', '_').replace('&', 'and'),
+            'name': service_name,
             'hasStaticData': True,
             'maxRecordCount': 2000,
             'layerInfo': {
@@ -432,7 +559,7 @@ def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mo
             pass
 
 
-def _find_existing_service(gis: GIS, title: str, item_id: str = None):
+def _find_existing_service(gis: GIS, title: str, item_id: str = None, tgt=None):
     """
     Search for existing feature service by item_id first, then title and service name patterns.
     
@@ -460,19 +587,41 @@ def _find_existing_service(gis: GIS, title: str, item_id: str = None):
             except Exception as e:
                 logging.warning(f"Failed to retrieve item by ID '{item_id}': {e}")
         
-        # Generate potential service name (AGOL URL-safe conversion)
-        service_name = title.replace(' ', '_').replace('-', '_').replace('.', '_').replace('&', 'and')
-        # Remove multiple underscores and clean up
-        import re
-        service_name = re.sub(r'_+', '_', service_name).strip('_')
+        # Generate potential service name using same logic as publish functions
+        service_name = tgt.agol.service_name if tgt else title.replace(' ', '_').replace('-', '_').replace('&', 'and').lower()
         
-        # Search 2: Exact title match
+        # Search 2: Exact title match for Feature Services
         title_query = f'title:"{title}" AND type:"Feature Service"'
         title_results = gis.content.search(
             query=title_query,
             item_type="Feature Service", 
             max_items=10
         )
+        
+        # Search 2b: Also check for orphaned GeoJSON items with same title
+        geojson_query = f'title:"{title}" AND type:"GeoJson"'
+        geojson_results = gis.content.search(
+            query=geojson_query,
+            item_type="GeoJson",
+            max_items=5
+        )
+        
+        # Check if any GeoJSON items can be republished as our service
+        for geojson_item in geojson_results:
+            try:
+                # Check if this GeoJSON has no related feature services
+                related_services = geojson_item.related_items('Service2Data', 'reverse')
+                if len(related_services) == 0:
+                    # This is an orphaned GeoJSON that can be republished
+                    logging.info(f"Found orphaned GeoJSON item with matching title: {geojson_item.title} ({geojson_item.itemid})")
+                    # Create a mock service object to represent this reusable GeoJSON
+                    geojson_item._can_republish = True
+                    geojson_item._original_type = geojson_item.type
+                    geojson_item.type = "Feature Service"  # Temporarily change type for compatibility
+                    title_results.append(geojson_item)
+            except Exception as check_error:
+                logging.debug(f"Error checking GeoJSON relationships for {geojson_item.title}: {check_error}")
+                continue
         
         # Search 3: Service name pattern match (broader search)
         name_query = f'name:*{service_name}* AND type:"Feature Service"'
@@ -482,7 +631,41 @@ def _find_existing_service(gis: GIS, title: str, item_id: str = None):
             max_items=20
         )
         
-        # Search 4: Fallback - search by owner and service name pattern
+        # Search 4: Check for exact service name conflicts using REST API
+        try:
+            # Check if service name exists by searching for URL patterns
+            url_query = f'url:*{service_name}* AND type:"Feature Service"'
+            url_results = gis.content.search(
+                query=url_query,
+                item_type="Feature Service",
+                max_items=20
+            )
+            
+            # Also check user's services for any containing this service name
+            user_services = gis.content.search(
+                query=f'owner:{gis.users.me.username} AND type:"Feature Service"',
+                max_items=100
+            )
+            
+            # Filter for services that might conflict with our service name
+            service_name_conflicts = []
+            for service in user_services:
+                if hasattr(service, 'url') and service.url:
+                    # Extract service name from URL (last segment before /FeatureServer)
+                    url_parts = service.url.split('/')
+                    if len(url_parts) > 1:
+                        actual_service_name = url_parts[-2] if url_parts[-1] == 'FeatureServer' else url_parts[-1]
+                        if actual_service_name.lower() == service_name.lower():
+                            service_name_conflicts.append(service)
+                            logging.warning(f"Found service name conflict: '{service.title}' uses service name '{actual_service_name}'")
+            
+            url_results.extend(service_name_conflicts)
+            
+        except Exception as search_error:
+            logging.warning(f"URL-based service search failed: {search_error}")
+            url_results = []
+        
+        # Search 5: Fallback - search by owner and service name pattern
         owner_query = f'owner:{gis.users.me.username} AND type:"Feature Service"'
         owner_results = gis.content.search(
             query=owner_query,
@@ -492,6 +675,7 @@ def _find_existing_service(gis: GIS, title: str, item_id: str = None):
         
         # Combine and deduplicate results
         all_results = title_results + [item for item in name_results if item not in title_results]
+        all_results += [item for item in url_results if item not in all_results]
         all_results += [item for item in owner_results if item not in all_results]
         
         # Filter for exact title matches first

@@ -92,7 +92,7 @@ def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
 
 def fetch_gdf(config_obj, target_name: str, **kwargs) -> gpd.GeoDataFrame:
     """
-    Fetch geospatial data with automatic retry logic for network resilience.
+    Fetch geospatial data.
     
     Args:
         config_obj: Configuration object (adapted from CLI integration)
@@ -189,11 +189,11 @@ def _fetch_gdf_attempt(config_obj, target_name: str, **kwargs) -> gpd.GeoDataFra
             parquet_url = _parquet_url_from_config(overture_config, target_config.get('theme'), target_config.get('type'))
             sql = _build_optimized_query(parquet_url, xmin, ymin, xmax, ymax, target_config, limit)
         
-        logging.info("Executing optimized query...")
+        logging.info("Executing optimized query with two-step processing...")
         logging.info(f"SQL preview: {sql[:200]}...")
         start_time = time.time()
         
-        # Always use temp file strategy for consistent, predictable behavior
+        # Use optimized two-step processing (recommended by Overture docs)
         gdf = _fetch_via_temp_file(con, sql)
         
         elapsed = time.time() - start_time
@@ -280,50 +280,109 @@ def _fetch_dual_query(con: duckdb.DuckDBPyConnection, overture_config: dict, tar
 
 
 def _fetch_via_temp_file(con: duckdb.DuckDBPyConnection, sql: str) -> gpd.GeoDataFrame:
-    """Optimized data processing with Arrow, with a fallback to temp file strategy."""
+    """Optimized two-step processing following Overture documentation recommendations."""
     
-    # First, try Arrow-based direct processing (much faster)
-    try:
-        logging.info("Attempting Arrow direct processing (optimized path)")
-        return _fetch_via_arrow(con, sql)
-    except Exception as arrow_err:
-        logging.warning(f"Arrow processing failed: {arrow_err}, falling back to temp file")
-    
-    # Fallback to original temp file approach
+    # Step 1: Execute query and save to temporary parquet file (Overture recommended approach)
     with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp:
         temp_path = tmp.name
     
     try:
-        # Export query results to temporary Parquet file using DuckDB's native Parquet support
-        export_sql = f"""
-        COPY (
-            SELECT *, ST_AsWKB(geom) AS geometry
-            FROM ({sql})
-        ) TO '{temp_path}' 
-        (FORMAT PARQUET);
-        """
+        start_time = time.time()
         
-        logging.info(f"Exporting to temporary file: {temp_path}")
-        con.execute(export_sql)
+        # First step: Save query result directly to parquet (more efficient than inline processing)
+        logging.info(f"Step 1: Executing query and saving to parquet: {temp_path}")
+        
+        # Execute the main query with any SET variable commands
+        if "SET variable" in sql:
+            # Find the end of the variable setting (look for "); followed by SELECT)
+            # This is more robust than splitting on first SELECT which might be inside the variable
+            pattern_end = ");"
+            pattern_start = "SELECT"
+            
+            # Find all positions where "); occurs
+            pos = 0
+            variable_end = -1
+            while pos < len(sql):
+                pos = sql.find(pattern_end, pos)
+                if pos == -1:
+                    break
+                # Check if SELECT follows after some whitespace
+                after_pattern = sql[pos + len(pattern_end):].strip()
+                if after_pattern.startswith(pattern_start):
+                    variable_end = pos + len(pattern_end)
+                    break
+                pos += 1
+            
+            if variable_end > 0:
+                variable_sql = sql[:variable_end].strip()
+                main_query = sql[variable_end:].strip()
+                
+                # Execute variable settings first
+                logging.info("Executing variable settings...")
+                con.execute(variable_sql)
+                
+                # Then execute main query with COPY
+                copy_sql = f"""
+                COPY (
+                    {main_query}
+                ) TO '{temp_path}' (FORMAT PARQUET);
+                """
+            else:
+                # Fallback: couldn't split properly
+                logging.warning("Could not split variable SQL properly, executing as single statement")
+                copy_sql = f"""
+                COPY (
+                    {sql}
+                ) TO '{temp_path}' (FORMAT PARQUET);
+                """
+        else:
+            # Single query approach for non-variable queries
+            copy_sql = f"""
+            COPY (
+                {sql}
+            ) TO '{temp_path}' (FORMAT PARQUET);
+            """
+        
+        con.execute(copy_sql)
+        
+        query_time = time.time() - start_time
+        logging.info(f"Step 1 completed: Query executed and saved in {query_time:.1f}s")
         
         # Platform-specific file system synchronization
         if platform.system() == "Windows":
-            time.sleep(2)  # Allow file system to release locks
+            time.sleep(1)  # Allow file system to release locks
         
-        # Load processed data from temporary file
-        logging.info("Loading from temporary file...")
+        # Step 2: Load parquet and convert geometries (separate step for efficiency)
+        logging.info("Step 2: Loading parquet and converting geometries...")
+        load_start = time.time()
+        
         df = pd.read_parquet(temp_path)
         
-        # Convert WKB geometry column to shapely geometries
-        if "geometry" in df.columns:
-            df["geometry"] = df["geometry"].apply(
-                lambda b: swkb.loads(bytes(b)) if b is not None else None
-            )
+        # Convert geometry column to shapely geometries
+        if "geom" in df.columns:
+            # Handle both native geometry and WKB bytes
+            def convert_geometry(g):
+                if g is None:
+                    return None
+                elif isinstance(g, bytes):
+                    # Convert WKB bytes to shapely geometry
+                    return swkb.loads(g)
+                else:
+                    # Already a geometry object
+                    return g
+            
+            df["geometry"] = df["geom"].apply(convert_geometry)
+            df = df.drop(columns=["geom"])
             gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
         else:
             raise ValueError("No geometry column found in temp file")
         
-        logging.info(f"Loaded {len(gdf):,} features from temp file")
+        load_time = time.time() - load_start
+        total_time = time.time() - start_time
+        
+        logging.info(f"Step 2 completed: Loaded {len(gdf):,} features in {load_time:.1f}s")
+        logging.info(f"Two-step processing completed: {len(gdf):,} features in {total_time:.1f}s total")
+        
         return gdf
         
     finally:
@@ -391,8 +450,7 @@ def _get_columns_for_target_type(target_type: str) -> list[str]:
     """
     Get essential columns for a specific Overture data type.
     
-    Centralizes column selection logic to avoid duplication between
-    different query building functions.
+    Includes all fields needed for AGOL filtering and analysis.
     
     Args:
         target_type: Overture data type (segment, building, place, etc.)
@@ -402,11 +460,14 @@ def _get_columns_for_target_type(target_type: str) -> list[str]:
     """
     if target_type == "segment":  # Transportation
         return ['id', 'class', 'subtype', 'names', 'sources', 'version', 'routes']
-    elif target_type == "building":  # Buildings
+    elif target_type == "building":  # Buildings  
+        # Include class and subtype for type_category creation and filtering
         return ['id', 'names', 'sources', 'version', 'height', 'num_floors', 'class', 'subtype']
     elif target_type == "place":  # Places
-        return ['id', 'names', 'sources', 'version', 'categories', 'confidence', 'addresses', 'phones', 'websites']
+        # Include categories for type_category creation and confidence for quality filtering
+        return ['id', 'names', 'sources', 'version', 'categories', 'confidence', 'addresses', 'websites']
     else:
+        # Default - ensure class/subtype available for filtering
         return ['id', 'names', 'sources', 'version', 'class', 'subtype']
 
 
@@ -439,29 +500,30 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
         xmin, ymin, xmax, ymax = COUNTRY_BBOXES[iso2]
         bbox_buffer = 0.1  # Small buffer for edge cases
         bbox_filter = f"""
-        AND d.bbox.xmin >= {xmin - bbox_buffer}
-        AND d.bbox.xmax <= {xmax + bbox_buffer}
-        AND d.bbox.ymin >= {ymin - bbox_buffer}
-        AND d.bbox.ymax <= {ymax + bbox_buffer}
+        AND d.bbox.xmin > {xmin - bbox_buffer}
+        AND d.bbox.xmax < {xmax + bbox_buffer}
+        AND d.bbox.ymin > {ymin - bbox_buffer}
+        AND d.bbox.ymax < {ymax + bbox_buffer}
         """
         logging.info(f"Using bbox pre-filter for {iso2}: ({xmin}, {ymin}, {xmax}, {ymax}) + {bbox_buffer} buffer")
     else:
         logging.warning(f"No bbox defined for {iso2} - spatial query may be slow")
     
-    # Advanced optimized query with table aliases and explicit column projection
+    # Optimized query using DuckDB variables (recommended by Overture docs)
+    # DuckDB 1.1.3+ with native GeoParquet support - geometry is already GEOMETRY type
     sql = f"""
-    WITH country_boundary AS (
-        SELECT ST_GEOMFROMWKB(geometry) as country_geom
+    SET variable country_geom = (
+        SELECT geometry
         FROM read_parquet('{divisions_url}', filename=true, hive_partitioning=1)
         WHERE subtype = 'country' AND country = '{iso2}'
         LIMIT 1
-    )
-    SELECT {', '.join([f'd.{col}' for col in columns])}, ST_GEOMFROMWKB(d.geometry) AS geom
+    );
+    
+    SELECT {', '.join([f'd.{col}' for col in columns])}, d.geometry AS geom
     FROM read_parquet('{data_url}', filename=true, hive_partitioning=1) d
-    CROSS JOIN country_boundary cb
     WHERE 1=1
     {bbox_filter}
-    AND ST_INTERSECTS(ST_GEOMFROMWKB(d.geometry), cb.country_geom)
+    AND ST_INTERSECTS(d.geometry, getvariable('country_geom'))
     """
     
     # Apply data-specific filters
@@ -487,13 +549,14 @@ def _build_optimized_query(parquet_url: str, xmin: float, ymin: float, xmax: flo
     columns = _get_columns_for_target_type(target_type)
     
     # Optimized query with explicit column selection and table alias
+    # DuckDB 1.1.3+ with native GeoParquet support - geometry is already GEOMETRY type
     sql = f"""
-    SELECT {', '.join([f'd.{col}' for col in columns])}, ST_GEOMFROMWKB(d.geometry) AS geom
+    SELECT {', '.join([f'd.{col}' for col in columns])}, d.geometry AS geom
     FROM read_parquet('{parquet_url}', filename=true, hive_partitioning=1) d
-    WHERE d.bbox.xmin >= {xmin}
-      AND d.bbox.xmax <= {xmax}
-      AND d.bbox.ymin >= {ymin}
-      AND d.bbox.ymax <= {ymax}
+    WHERE d.bbox.xmin > {xmin}
+      AND d.bbox.xmax < {xmax}
+      AND d.bbox.ymin > {ymin}
+      AND d.bbox.ymax < {ymax}
     """
     
     # Apply data-specific filters with table alias

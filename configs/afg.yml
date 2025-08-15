@@ -26,6 +26,7 @@ organization:
 templates:
   title: "{country_name} {sector_title} Overture Maps"
   snippet: "{country_name} {sector_description} from Overture Maps."
+  service_name: "{iso3}_{sector_tag}"
   description: "
     {sector_title} data for {country_name} from Overture Maps {release} release.<br><br>
     <b>Data Type:</b> {data_type}<br>
@@ -74,6 +75,7 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}"
       description: "{description}"
+      service_name: "{service_name}"
       
       # Tags: base + sector-specific
       tags: "{tags_base} + ['transportation', 'roads']"
@@ -91,7 +93,7 @@ targets:
     theme: places
     type: place
     filter: "categories.primary = 'education'"
-    building_filter: "class IN ('college', 'kindergarten', 'school', 'university')"
+    building_filter: "subtype = 'education'"
     
     # Sector-specific Variables
     sector_title: "Education Facilities"
@@ -104,18 +106,19 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}"
       description: "{description}"
+      service_name: "{service_name}"
       tags: "{tags_base} + ['education', 'scorecard_education']"
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-      item_id: "086d9e5af73349cfac6324595ee7b20f"  # Existing layer
+      # item_id: ""  # Will be added after initial creation
 
   health:
     # Data Selection
     theme: places
     type: place
     filter: "categories.primary = 'health_and_medical'"
-    building_filter: "class IN ('medical', 'hospital')"
+    building_filter: "subtype = 'medical'"
     
     # Sector-specific Variables
     sector_title: "Health Facilities"
@@ -128,6 +131,7 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}"
       description: "{description}"
+      service_name: "{service_name}"
       tags: "{tags_base} + ['scorecard_health', 'health facilities']"
       access_information: "{access_information}"
       license_info: "{license_info}"
@@ -139,7 +143,7 @@ targets:
     theme: places
     type: place
     filter: "categories.primary IN ('retail', 'shopping', 'food_and_drink')"
-    building_filter: "class IN ('commercial', 'retail', 'supermarket', 'kiosk')"
+    building_filter: "subtype IN ('service', 'commercial')"
     
     # Sector-specific Variables
     sector_title: "Marketplaces"
@@ -175,6 +179,7 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}"
       description: "{description}"
+      service_name: "{service_name}"
       tags: "{tags_base} + ['places', 'poi', 'locations', 'amenities']"
       access_information: "{access_information}"
       license_info: "{license_info}"
