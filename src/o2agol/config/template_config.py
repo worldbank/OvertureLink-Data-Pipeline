@@ -8,9 +8,11 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
+
+from .countries import CountryInfo, CountryRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -59,21 +61,30 @@ class TemplateConfigParser:
     Configuration parser with dynamic templating support.
     
     Supports:
-    - Country/organization metadata at top level
+    - Country/organization metadata at top level or dynamic injection
     - Dynamic template variables: {country_name}, {sector_title}, etc.
     - Enterprise metadata standards
     - Professional tag and categorization
+    - Global configuration with runtime country selection
     """
     
-    def __init__(self, config_path: str | Path):
-        """Initialize parser with config file path"""
+    def __init__(self, config_path: str | Path, country_override: Optional[str] = None):
+        """
+        Initialize parser with config file path and optional country override
+        
+        Args:
+            config_path: Path to configuration file
+            country_override: ISO2/ISO3 code or country name to inject dynamically
+        """
         self.config_path = Path(config_path)
+        self.country_override = country_override
         self.raw_config = None
         self.country = None
         self.organization = None
         self.templates = None
         self.overture = None
         self.targets = None
+        self.is_global_config = False
         
         self._load_config()
         self._parse_metadata_sections()
@@ -89,16 +100,50 @@ class TemplateConfigParser:
         logger.debug(f"Loaded enhanced config from: {self.config_path}")
     
     def _parse_metadata_sections(self) -> None:
-        """Parse top-level metadata sections"""
-        # Country metadata
-        country_data = self.raw_config.get('country', {})
-        self.country = CountryConfig(
-            name=country_data.get('name', 'Unknown'),
-            iso2=country_data.get('iso2', 'XX'),
-            iso3=country_data.get('iso3', 'XXX'),
-            region=country_data.get('region', 'Unknown Region'),
-            bbox=country_data.get('bbox', [-180, -90, 180, 90])
-        )
+        """Parse top-level metadata sections with dynamic country injection support"""
+        # Check if this is a global config (no country section but has country_override)
+        self.is_global_config = 'country' not in self.raw_config and self.country_override
+        
+        # Country metadata - either from config file or dynamic injection
+        if self.is_global_config and self.country_override:
+            # Global config mode - inject country from registry
+            country_info = CountryRegistry.get_country(self.country_override)
+            if not country_info:
+                available_countries = [c.name for c in CountryRegistry.list_countries()[:10]]
+                raise ValueError(
+                    f"Country '{self.country_override}' not found in registry. "
+                    f"Available countries include: {', '.join(available_countries)}... "
+                    f"Use ISO2, ISO3, or full country name."
+                )
+            
+            # Convert CountryInfo to CountryConfig
+            self.country = CountryConfig(
+                name=country_info.name,
+                iso2=country_info.iso2,
+                iso3=country_info.iso3,
+                region=country_info.region,
+                bbox=country_info.bbox
+            )
+            
+            logger.info(f"Global config mode: Injected country data for {country_info.name} ({country_info.iso2})")
+            
+        else:
+            # Traditional config mode - use country section from file
+            country_data = self.raw_config.get('country', {})
+            self.country = CountryConfig(
+                name=country_data.get('name', 'Unknown'),
+                iso2=country_data.get('iso2', 'XX'),
+                iso3=country_data.get('iso3', 'XXX'),
+                region=country_data.get('region', 'Unknown Region'),
+                bbox=country_data.get('bbox', [-180, -90, 180, 90])
+            )
+            
+            # If country_override provided but country exists in config, warn about override
+            if self.country_override and 'country' in self.raw_config:
+                logger.warning(
+                    f"Country override '{self.country_override}' provided but config already has country section. "
+                    f"Using config file country: {self.country.name}"
+                )
         
         # Organization metadata
         org_data = self.raw_config.get('organization', {})
@@ -393,15 +438,22 @@ class TemplateConfigParser:
         """
         issues = []
         
+        # For global configs, country section is optional (injected dynamically)
+        if self.is_global_config:
+            required_sections = ['overture', 'targets']
+            if not self.country_override:
+                issues.append("Global config requires --country parameter")
+        else:
+            required_sections = ['country', 'overture', 'targets']
+        
         # Check required sections
-        required_sections = ['country', 'overture', 'targets']
         for section in required_sections:
             if section not in self.raw_config:
                 issues.append(f"Missing required section: {section}")
         
-        # Check country metadata
+        # Check country metadata (should be resolved by now)
         if not self.country.name or self.country.name == 'Unknown':
-            issues.append("Country name not specified")
+            issues.append("Country name not specified or not found in registry")
         
         # Check targets
         for target_name, target_config in self.targets.items():
@@ -417,16 +469,28 @@ class TemplateConfigParser:
                 issues.append(f"Target {target_name}: Missing type")
         
         return issues
+    
+    def is_using_global_config(self) -> bool:
+        """Check if this parser is using global configuration mode"""
+        return self.is_global_config
+    
+    def get_country_source(self) -> str:
+        """Get description of where country data came from"""
+        if self.is_global_config:
+            return f"Country registry (--country {self.country_override})"
+        else:
+            return f"Configuration file ({self.config_path.name})"
 
 
-def create_template_config_parser(config_path: str | Path) -> TemplateConfigParser:
+def create_template_config_parser(config_path: str | Path, country_override: Optional[str] = None) -> TemplateConfigParser:
     """
-    Factory function to create enhanced config parser
+    Factory function to create enhanced config parser with optional country injection
     
     Args:
-        config_path: Path to enhanced YAML configuration file
+        config_path: Path to YAML configuration file
+        country_override: Optional country code/name for global config mode
         
     Returns:
-        EnhancedConfigParser instance
+        TemplateConfigParser instance
     """
-    return TemplateConfigParser(config_path)
+    return TemplateConfigParser(config_path, country_override)

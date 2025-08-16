@@ -60,23 +60,27 @@ def is_template_config(config_path: str) -> bool:
     """
     Detect if config file uses the template format with dynamic variables.
     
-    Template configs have top-level 'country' and 'templates' sections.
+    Template configs have a 'templates' section and either a 'country' section 
+    or are designed to work with dynamic country injection.
     """
     try:
         with open(config_path) as f:
             config = yaml.safe_load(f)
-        return 'country' in config and 'templates' in config
+        # Template config if it has templates section
+        # Country section is optional (for global configs with dynamic injection)
+        return 'templates' in config
     except Exception:
         return False
 
 
-def load_pipeline_config(config_path: str) -> dict[str, Any]:
+def load_pipeline_config(config_path: str, country_override: str = None) -> dict[str, Any]:
     """
     Load pipeline configuration from YAML file and combine with secure credentials.
-    Supports both legacy and enhanced config formats with templating.
+    Supports both legacy and enhanced config formats with templating, plus global configs with country override.
     
     Args:
         config_path: Path to YAML configuration file
+        country_override: Optional country code/name for global config mode
         
     Returns:
         Dict containing complete pipeline configuration
@@ -84,7 +88,7 @@ def load_pipeline_config(config_path: str) -> dict[str, Any]:
     Raises:
         FileNotFoundError: If configuration file does not exist
         ConfigurationError: If secure configuration is invalid
-        ValueError: If required YAML fields are missing
+        ValueError: If required YAML fields are missing or country not found
     """
     # Load secure configuration (credentials and DuckDB settings only)
     secure_config = Config()
@@ -92,8 +96,8 @@ def load_pipeline_config(config_path: str) -> dict[str, Any]:
     
     # Check config format and load appropriately
     if is_template_config(config_path):
-        # Template config with dynamic variables
-        template_parser = TemplateConfigParser(config_path)
+        # Template config with dynamic variables (and optional country override)
+        template_parser = TemplateConfigParser(config_path, country_override)
         
         # Validate template config
         validation_issues = template_parser.validate_config()
@@ -126,6 +130,8 @@ def load_pipeline_config(config_path: str) -> dict[str, Any]:
         }
         
         logging.info(f"Loaded template config: {template_parser.country.name} ({template_parser.country.iso3})")
+        if template_parser.is_using_global_config():
+            logging.info(f"Global config mode: Country data from {template_parser.get_country_source()}")
         
     else:
         # Legacy config format
@@ -249,6 +255,7 @@ def process_target(
     verbose: bool,
     use_divisions: bool = True,
     log_to_file: bool = False,
+    country: Optional[str] = None,
 ):
     """
     Execute data processing pipeline for specified target with comprehensive logging.
@@ -261,11 +268,12 @@ def process_target(
         config: Path to YAML configuration file
         mode: Processing mode (initial, overwrite, append)
         limit: Optional feature limit for testing and development
-        iso2: ISO2 country code override
+        iso2: ISO2 country code override (legacy)
         dry_run: Execute validation without data publication
         verbose: Enable detailed logging output
         use_divisions: Use Overture Divisions for precise boundaries
         log_to_file: Create timestamped log files
+        country: Country code/name for global config mode
     """
     # Initialize logging with optional file output
     setup_logging(verbose, target_name, mode, log_to_file)
@@ -283,6 +291,8 @@ def process_target(
         cmd_parts.extend(["--limit", str(limit)])
     if iso2:
         cmd_parts.extend(["--iso2", iso2])
+    if country:
+        cmd_parts.extend(["--country", country])
     if not use_divisions:
         cmd_parts.append("--use-bbox")
     if dry_run:
@@ -300,9 +310,12 @@ def process_target(
     logging.info(f"Spatial filtering method: {'Overture Divisions' if use_divisions else 'Bounding Box'}")
     logging.info(f"Dry run mode: {dry_run}")
     
-
-    # Load unified configuration
-    cfg = load_pipeline_config(config)
+    # Validate parameter combinations
+    if country and iso2:
+        logging.warning(f"Both --country ({country}) and --iso2 ({iso2}) provided. Using --country for global config, --iso2 for selector override.")
+    
+    # Load unified configuration with optional country override
+    cfg = load_pipeline_config(config, country)
     
     # Log configuration status
     logging.info(f"Connected to ArcGIS as: {cfg['gis'].users.me.username}")
@@ -311,8 +324,15 @@ def process_target(
 
     # Get selector configuration with optional ISO2 override
     selector = get_selector_config(cfg, iso2)
+    logging.debug(f"Selector configuration: {selector}")
+    
     if iso2:
         logging.info(f"Country code override applied: {iso2.upper()}")
+    else:
+        # Log the country being used from global config
+        selector_iso2 = selector.get('iso2')
+        if selector_iso2:
+            logging.info(f"Using country from global config: {selector_iso2}")
 
     # Get target configuration
     try:
@@ -341,7 +361,10 @@ def process_target(
                 self.yaml_config = cfg_dict['yaml']
                 self.secure_config = cfg_dict['secure']
                 self.overture_config = cfg_dict['overture']  # YAML-based config
-                self.selector = type('SelectorConfig', (), selector_dict)() if selector_dict else None
+                # Store selector as a simple object with the dict as __dict__ 
+                self.selector = type('SelectorConfig', (), {})()
+                if selector_dict:
+                    self.selector.__dict__.update(selector_dict)
                 
                 # Create target config with instance attributes (not class attributes)
                 target_config_instance = type('TargetConfig', (), {})()
@@ -490,7 +513,8 @@ def roads(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
+    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -499,27 +523,23 @@ def roads(
     """
     Process road network data from Overture Maps for publication to ArcGIS Online.
 
-    Supports both bounding box and Overture Divisions-based spatial filtering
-    for precise country boundary adherence. Default configuration uses fast 
-    bounding box filtering optimized for development workflows.
-    
-    Production deployments should utilize --use-divisions for precise country 
-    boundary accuracy using Overture Divisions.
+    Supports both country-specific configs and global config with --country parameter.
+    Also supports both bounding box and Overture Divisions-based spatial filtering
+    for precise country boundary adherence.
     
     Examples:
-      Development testing:
-        python -m o2agol.cli roads -c configs/afg.yml --limit 1000
+      Global config (recommended):
+        python -m o2agol.cli roads -c configs/global.yml --country af --limit 1000
+        python -m o2agol.cli roads -c configs/global.yml --country pak --dry-run
       
-      Validation workflow:
+      Country-specific config (legacy):
+        python -m o2agol.cli roads -c configs/afg.yml --limit 1000
         python -m o2agol.cli roads -c configs/afg.yml --dry-run
       
       Production deployment:
-        python -m o2agol.cli roads -c configs/afg.yml --use-divisions --log-to-file
-        
-      Development with bbox filtering:
-        python -m o2agol.cli roads -c configs/afg.yml --use-bbox --log-to-file
+        python -m o2agol.cli roads -c configs/global.yml --country ind --use-divisions --log-to-file
     """
-    process_target("roads", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
+    process_target("roads", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
 
 
 @app.command("buildings")
@@ -527,7 +547,8 @@ def buildings(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
+    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -536,11 +557,13 @@ def buildings(
     """
     Process building footprint data from Overture Maps for publication to ArcGIS Online.
 
-    Supports both bounding box and Overture Divisions-based spatial filtering
-    for precise country boundary adherence. Optimized for large-scale building
-    datasets with enterprise-grade error handling and audit logging.
+    Supports global config with --country parameter and bounding box/Divisions spatial filtering.
+    Optimized for large-scale building datasets with enterprise-grade error handling.
+    
+    Examples:
+      python -m o2agol.cli buildings -c configs/global.yml --country bd --limit 1000
     """
-    process_target("buildings", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
+    process_target("buildings", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
 
 
 @app.command("places")
@@ -548,7 +571,8 @@ def places(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
+    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -557,11 +581,12 @@ def places(
     """
     Process points of interest data from Overture Maps for publication to ArcGIS Online.
 
-    Designed for processing place categories including education facilities, 
-    healthcare centers, commercial establishments, and other points of interest
-    relevant to development and humanitarian operations.
+    Supports global config with --country parameter for processing place categories.
+    
+    Examples:
+      python -m o2agol.cli places -c configs/global.yml --country in --limit 500
     """
-    process_target("places", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
+    process_target("places", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
 
 
 @app.command("education")
@@ -569,7 +594,8 @@ def education(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
+    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -578,10 +604,12 @@ def education(
     """
     Process education facilities from Overture Maps for publication to ArcGIS Online.
 
-    Includes schools, colleges, universities, and other educational institutions
-    filtered using Overture's education category hierarchy.
+    Supports global config with --country parameter for educational institution mapping.
+    
+    Examples:
+      python -m o2agol.cli education -c configs/global.yml --country ng --limit 100
     """
-    process_target("education", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
+    process_target("education", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
 
 
 @app.command("health")
@@ -589,7 +617,8 @@ def health(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
+    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -598,10 +627,12 @@ def health(
     """
     Process health and medical facilities from Overture Maps for publication to ArcGIS Online.
 
-    Includes hospitals, clinics, health centers, dental offices, and other medical
-    facilities filtered using Overture's health_and_medical category hierarchy.
+    Supports global config with --country parameter for healthcare facility mapping.
+    
+    Examples:
+      python -m o2agol.cli health -c configs/global.yml --country et --limit 50
     """
-    process_target("health", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
+    process_target("health", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
 
 
 @app.command("markets")
@@ -609,7 +640,8 @@ def markets(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override")] = None,
+    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
+    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
@@ -618,10 +650,12 @@ def markets(
     """
     Process markets and retail establishments from Overture Maps for publication to ArcGIS Online.
 
-    Includes marketplaces, grocery stores, shopping centers, and retail establishments
-    filtered using Overture's retail and market category hierarchies.
+    Supports global config with --country parameter for commercial facility mapping.
+    
+    Examples:
+      python -m o2agol.cli markets -c configs/global.yml --country br --limit 200
     """
-    process_target("markets", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file)
+    process_target("markets", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
 
 
 @app.command("version")

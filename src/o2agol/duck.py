@@ -12,15 +12,15 @@ import pandas as pd
 import shapely.wkb as swkb
 
 from .config import Config
+from .config.countries import CountryRegistry
 
-# Country bounding boxes for efficient spatial filtering
-# Eliminates expensive polygon-based country boundary lookups
-COUNTRY_BBOXES = {
-    'AF': (60.5, 29.4, 74.9, 38.5),   # Afghanistan
-    'PK': (60.9, 23.6, 77.8, 37.1),   # Pakistan
-    'BD': (88.0, 20.7, 92.7, 26.6),   # Bangladesh  
-    'IN': (68.1, 6.7, 97.4, 37.1),    # India
-}
+# Get country bounding boxes from centralized registry
+# Maintains backward compatibility with existing code patterns
+def get_country_bboxes() -> dict[str, tuple[float, float, float, float]]:
+    """Get country bounding boxes from registry for spatial filtering"""
+    bboxes = CountryRegistry.get_bounding_boxes()
+    # Convert list format to tuple format for backward compatibility
+    return {iso2: tuple(bbox) for iso2, bbox in bboxes.items()}
 
 
 def _parquet_url_from_config(overture_config: dict, theme: str, type_: str) -> str:
@@ -179,11 +179,16 @@ def _fetch_gdf_attempt(config_obj, target_name: str, **kwargs) -> gpd.GeoDataFra
             sql = _build_divisions_query(overture_config, target_name, target_config, selector, limit)
         else:
             # Fall back to bbox filtering
-            iso2 = selector.get('iso2', 'AF').upper()
-            if iso2 not in COUNTRY_BBOXES:
-                raise ValueError(f"No bounding box defined for country {iso2}. Add to COUNTRY_BBOXES in duck.py")
+            iso2 = selector.get('iso2')
+            if not iso2:
+                raise ValueError("ISO2 country code missing from selector configuration. Check country selection.")
+            iso2 = iso2.upper()
+            country_bboxes = get_country_bboxes()
+            if iso2 not in country_bboxes:
+                available_countries = list(country_bboxes.keys())[:10]
+                raise ValueError(f"No bounding box defined for country {iso2}. Available countries: {available_countries}")
             
-            xmin, ymin, xmax, ymax = COUNTRY_BBOXES[iso2]
+            xmin, ymin, xmax, ymax = country_bboxes[iso2]
             logging.info(f"Using bbox for {iso2}: ({xmin}, {ymin}, {xmax}, {ymax})")
             
             parquet_url = _parquet_url_from_config(overture_config, target_config.get('theme'), target_config.get('type'))
@@ -222,8 +227,12 @@ def _fetch_dual_query(con: duckdb.DuckDBPyConnection, overture_config: dict, tar
     if use_divisions:
         places_sql = _build_divisions_query(overture_config, target_name, places_config, selector, limit)
     else:
-        iso2 = selector.get('iso2', 'AF').upper()
-        xmin, ymin, xmax, ymax = COUNTRY_BBOXES[iso2]
+        iso2 = selector.get('iso2')
+        if not iso2:
+            raise ValueError("ISO2 country code missing from selector configuration. Check country selection.")
+        iso2 = iso2.upper()
+        country_bboxes = get_country_bboxes()
+        xmin, ymin, xmax, ymax = country_bboxes[iso2]
         parquet_url = _parquet_url_from_config(overture_config, places_config.get('theme'), places_config.get('type'))
         places_sql = _build_bbox_query(parquet_url, xmin, ymin, xmax, ymax, places_config, limit)
     
@@ -243,8 +252,12 @@ def _fetch_dual_query(con: duckdb.DuckDBPyConnection, overture_config: dict, tar
     if use_divisions:
         buildings_sql = _build_divisions_query(overture_config, target_name, buildings_config, selector, limit)
     else:
-        iso2 = selector.get('iso2', 'AF').upper()
-        xmin, ymin, xmax, ymax = COUNTRY_BBOXES[iso2]
+        iso2 = selector.get('iso2')
+        if not iso2:
+            raise ValueError("ISO2 country code missing from selector configuration. Check country selection.")
+        iso2 = iso2.upper()
+        country_bboxes = get_country_bboxes()
+        xmin, ymin, xmax, ymax = country_bboxes[iso2]
         parquet_url = _parquet_url_from_config(overture_config, buildings_config.get('theme'), buildings_config.get('type'))
         buildings_sql = _build_bbox_query(parquet_url, xmin, ymin, xmax, ymax, buildings_config, limit)
     
@@ -434,7 +447,14 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
     """
     target_type = target_config.get('type')
     target_theme = target_config.get('theme')
-    iso2 = selector.get('iso2', 'AF').upper()
+    
+    # Get ISO2 from selector - no default fallback to ensure proper country selection
+    iso2 = selector.get('iso2')
+    if not iso2:
+        raise ValueError("ISO2 country code missing from selector configuration. Check country selection.")
+    iso2 = iso2.upper()
+    
+    logging.info(f"Building Divisions query for country: {iso2}")
     
     if not target_type or not target_theme:
         raise ValueError(f"Missing theme ({target_theme}) or type ({target_type}) in target configuration")
@@ -451,8 +471,9 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
     
     # CRITICAL OPTIMIZATION: Always use bbox pre-filtering for spatial queries
     bbox_filter = ""
-    if iso2 in COUNTRY_BBOXES:
-        xmin, ymin, xmax, ymax = COUNTRY_BBOXES[iso2]
+    country_bboxes = get_country_bboxes()
+    if iso2 in country_bboxes:
+        xmin, ymin, xmax, ymax = country_bboxes[iso2]
         bbox_buffer = 0.1  # Small buffer for edge cases
         bbox_filter = f"""
         AND d.bbox.xmin > {xmin - bbox_buffer}

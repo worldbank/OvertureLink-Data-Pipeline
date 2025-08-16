@@ -1,61 +1,62 @@
-# Configuration template for Overture Maps to ArcGIS pipelines, copy for your own use
-# This was originally made for World Bank uploads, so change whatever you need to fit your use case
-
-# Country/Region Metadata (Top-level)
-country:
-  name: "Counter name here"            # Full country name for titles
-  iso2: "ISO 2 here"                    # 2-letter ISO code
-  iso3: "ISO3 here"                   # 3-letter ISO code for tags
-  region: "Region here"          # Regional classification
-  bbox: [60.5, 29.4, 74.9, 38.5]  # [min_lon, min_lat, max_lon, max_lat]
+# Global Configuration Template for Overture Maps to ArcGIS Pipeline
+# Use with --country parameter to specify target country dynamically
+#
+# Usage Examples:
+#   python -m o2agol.cli health -c configs/global.yml --country afg --log-to-file --limit 10
+#   python -m o2agol.cli roads -c configs/global.yml --country pak --dry-run
+#   python -m o2agol.cli education -c configs/global.yml --country ind --use-bbox
 
 # Data Source Configuration
 overture:
   base_url: "s3://overturemaps-us-west-2/release"
   s3_region: "us-west-2"
-  release: "2024-11-13.0" # choose your release date
+  release: "2025-07-23.0"
 
 # Organization Metadata Templates
 organization:
-  name: "Name"
-  contact_email: "Email
-  attribution: "Organization"
-  license: "Licensing information here."
+  name: "Your Name"
+  contact_email: "your.email@example.com"
+  attribution: "Your Organization"
+  license: "Internal use only. External sharing requires approval."
   update_frequency: "Monthly"
 
-# Global Content Templates (Using dynamic variables) You have to use HTML for it to appear correctly in AGOL.
+# Global Content Templates (Using dynamic variables)
+# Country data will be injected dynamically based on --country parameter
 templates:
-  title: "{country_name} {sector_title}"
+  title: "{country_name} {sector_title} Overture Maps"
   snippet: "{country_name} {sector_description} from Overture Maps."
+  service_name: "{iso3}_{sector_tag}"
   description: "
     {sector_title} data for {country_name} from Overture Maps {release} release.<br><br>
     <b>Data Type:</b> {data_type}<br>
     <b>Geographic Coverage:</b> {country_name} ({iso3})<br>
     <b>Source:</b> Overture Maps Foundation<br>
-    <b>Processing:</b> {organization} ETL Pipeline<br>
+    <b>Processing:</b> Overture to AGOL data pipeline. You can find the processing pipeline on GitHub <a href=\"https://github.com/worldbank/Overture-ArcGIS-Pipeline\" target=\"_blank\" rel=\"noopener noreferrer\">here</a>.<br>
     <b>Release Date:</b> {release}<br>
     <b>Update Frequency:</b> {update_frequency}<br><br>
     This dataset provides comprehensive {sector_description} information for {country_name}, processed through an automated data pipeline following organizational data standards.<br><br>
     
     <b>Usage & Attribution</b><br>
-    Use consistent with Overture’s license and attribution guidance. Some Overture themes incorporate third‑party sources with additional requirements—see the Overture attribution page for theme‑level details.<br>
+    Use consistent with Overture's license and attribution guidance. Some Overture themes incorporate third‑party sources with additional requirements—see the Overture attribution page for theme‑level details.<br>
     <b>Contact:</b> {contact_email}<br>
     <b>Last Updated:</b> {current_date}
     "
   license_info: "{license}<br>
     © Overture Maps Foundation and contributors. Licensed under CDLA‑Permissive‑2.0.<br> 
     Some Overture themes may include third‑party sources with additional attribution or terms. <br>
-    World Bank processing and value‑added metadata © {current_year} International Bank for Reconstruction and Development / The World Bank.<br>
+    World Bank processing and value‑added metadata© International Bank for Reconstruction and Development / The World Bank.<br>
     "
+  access_information: "{attribution}"
   # Base tags template: ISO3 + sector + source + year + organization tags
   tags_base: ["{iso3}", "overture maps", "public"]
 
 # Spatial Filtering Configuration
+# Country ISO2 will be injected dynamically
 selector:
   by: division_country  # or "bbox_only" for development
-  iso2: "{iso2}"       # Will be populated from country.iso2
+  iso2: "{iso2}"       # Will be populated from country registry
 
-# Queries and Specific Metadata
+# Data Targets and Specific Metadata
 targets:
   roads:
     # Data Selection
@@ -75,6 +76,7 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}"
       description: "{description}"
+      service_name: "{service_name}"
       
       # Tags: base + sector-specific
       tags: "{tags_base} + ['transportation', 'roads']"
@@ -85,13 +87,38 @@ targets:
       
       # Technical Configuration
       upsert_key: "id"
-      # item_id: " " 
+      # item_id: ""  # Will be populated after initial creation
+
+  buildings:
+    # Data Selection
+    theme: buildings
+    type: building
+    # No filter - all buildings
+    
+    # Sector-specific Variables
+    sector_title: "Building Footprints"
+    sector_description: "building infrastructure"
+    sector_tag: "buildings"
+    data_type: "Building Infrastructure"
+    
+    # ArcGIS Online Configuration
+    agol:
+      item_title: "{title}"
+      snippet: "{snippet}"
+      description: "{description}"
+      service_name: "{service_name}"
+      tags: "{tags_base} + ['buildings', 'infrastructure']"
+      access_information: "{access_information}"
+      license_info: "{license_info}"
+      upsert_key: "id"
+      # item_id: ""
 
   education:
     # Data Selection  
     theme: places
     type: place
     filter: "categories.primary = 'education'"
+    building_filter: "subtype = 'education'"
     
     # Sector-specific Variables
     sector_title: "Education Facilities"
@@ -104,17 +131,19 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}"
       description: "{description}"
+      service_name: "{service_name}"
       tags: "{tags_base} + ['education', 'scorecard_education']"
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-      # item_id: " " 
+      # item_id: ""  # Will be added after initial creation
 
   health:
     # Data Selection
     theme: places
     type: place
     filter: "categories.primary = 'health_and_medical'"
+    building_filter: "subtype = 'medical'"
     
     # Sector-specific Variables
     sector_title: "Health Facilities"
@@ -127,20 +156,22 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}"
       description: "{description}"
+      service_name: "{service_name}"
       tags: "{tags_base} + ['scorecard_health', 'health facilities']"
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-       # item_id: " "
+      # item_id: ""
 
   markets:
     # Data Selection
     theme: places
     type: place
-    filter: "categories.primary = 'retail'"
+    filter: "categories.primary IN ('retail', 'shopping', 'food_and_drink')"
+    building_filter: "subtype IN ('service', 'commercial')"
     
     # Sector-specific Variables
-    sector_title: "Marketplaces & Retail"
+    sector_title: "Marketplaces"
     sector_description: "commercial markets and retail facilities"
     sector_tag: "markets"
     data_type: "Commercial Infrastructure"
@@ -150,11 +181,12 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}" 
       description: "{description}"
+      service_name: "{service_name}"
       tags: "{tags_base} + ['markets', 'scorecard_investment', 'scorecard_community']"
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-      # item_id: "" # Will be populated after first upload
+      # item_id: ""
 
   places:
     # Data Selection
@@ -173,8 +205,9 @@ targets:
       item_title: "{title}"
       snippet: "{snippet}"
       description: "{description}"
+      service_name: "{service_name}"
       tags: "{tags_base} + ['places', 'poi', 'locations', 'amenities']"
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"
-      # item_id: "" # Will be populated after first upload
+      # item_id: ""
