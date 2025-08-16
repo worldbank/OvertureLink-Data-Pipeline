@@ -21,3 +21,8 @@ jobs:
         run: |
           . .venv/bin/activate
           python -c "import sys; print('ok')"
+      - name: Cleanup temp files
+        if: always()
+        run: |
+          . .venv/bin/activate
+          python -c "from src.o2agol.cleanup import cleanup_stale_files; cleanup_stale_files(0)"

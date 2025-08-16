@@ -5,9 +5,14 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import typer
+
+# Note: We use Optional[T] instead of T | None (PEP 604) throughout this file
+# because Typer 0.12.3 doesn't support the newer union syntax in Annotated types.
+# The UP045 ruff rule is disabled in pyproject.toml to prevent automatic conversion.
 import yaml
 from dotenv import load_dotenv
 
+from .cleanup import full_cleanup_check, register_cleanup_handlers
 from .config import Config
 from .config.template_config import TemplateConfigParser
 from .duck import fetch_gdf
@@ -256,6 +261,7 @@ def process_target(
     use_divisions: bool = True,
     log_to_file: bool = False,
     country: Optional[str] = None,
+    skip_cleanup: bool = False,
 ):
     """
     Execute data processing pipeline for specified target with comprehensive logging.
@@ -277,6 +283,14 @@ def process_target(
     """
     # Initialize logging with optional file output
     setup_logging(verbose, target_name, mode, log_to_file)
+    
+    # Register cleanup handlers for graceful interruption handling
+    register_cleanup_handlers()
+    
+    # Perform temp directory cleanup and validation
+    if not full_cleanup_check(skip_cleanup=skip_cleanup):
+        logging.error("Temp directory size limit exceeded - aborting operation")
+        raise typer.Exit(1)
     
     # Log execution context for audit trails
     start_time = datetime.now()
@@ -519,6 +533,7 @@ def roads(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
 ):
     """
     Process road network data from Overture Maps for publication to ArcGIS Online.
@@ -539,7 +554,7 @@ def roads(
       Production deployment:
         python -m o2agol.cli roads -c configs/global.yml --country ind --use-divisions --log-to-file
     """
-    process_target("roads", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
+    process_target("roads", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
 
 
 @app.command("buildings")
@@ -553,6 +568,7 @@ def buildings(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
 ):
     """
     Process building footprint data from Overture Maps for publication to ArcGIS Online.
@@ -563,7 +579,7 @@ def buildings(
     Examples:
       python -m o2agol.cli buildings -c configs/global.yml --country bd --limit 1000
     """
-    process_target("buildings", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
+    process_target("buildings", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
 
 
 @app.command("places")
@@ -577,6 +593,7 @@ def places(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
 ):
     """
     Process points of interest data from Overture Maps for publication to ArcGIS Online.
@@ -586,7 +603,7 @@ def places(
     Examples:
       python -m o2agol.cli places -c configs/global.yml --country in --limit 500
     """
-    process_target("places", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
+    process_target("places", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
 
 
 @app.command("education")
@@ -600,6 +617,7 @@ def education(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
 ):
     """
     Process education facilities from Overture Maps for publication to ArcGIS Online.
@@ -609,7 +627,7 @@ def education(
     Examples:
       python -m o2agol.cli education -c configs/global.yml --country ng --limit 100
     """
-    process_target("education", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
+    process_target("education", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
 
 
 @app.command("health")
@@ -623,6 +641,7 @@ def health(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
 ):
     """
     Process health and medical facilities from Overture Maps for publication to ArcGIS Online.
@@ -632,7 +651,7 @@ def health(
     Examples:
       python -m o2agol.cli health -c configs/global.yml --country et --limit 50
     """
-    process_target("health", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
+    process_target("health", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
 
 
 @app.command("markets")
@@ -646,6 +665,7 @@ def markets(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
 ):
     """
     Process markets and retail establishments from Overture Maps for publication to ArcGIS Online.
@@ -655,7 +675,7 @@ def markets(
     Examples:
       python -m o2agol.cli markets -c configs/global.yml --country br --limit 200
     """
-    process_target("markets", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country)
+    process_target("markets", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
 
 
 @app.command("version")

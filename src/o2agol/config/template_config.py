@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import yaml
 
-from .countries import CountryInfo, CountryRegistry
+from .countries import CountryRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class TargetMetadata:
     
     # Technical configuration
     upsert_key: str
-    item_id: str | None = None
+    item_id: Optional[str] = None
 
 
 class TemplateConfigParser:

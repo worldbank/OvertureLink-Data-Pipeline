@@ -8,7 +8,6 @@ Updated with Natural Earth bounding box data for comprehensive global coverage.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
 
 
 @dataclass
@@ -18,7 +17,7 @@ class CountryInfo:
     iso2: str
     iso3: str
     region: str
-    bbox: List[float]  # [min_lon, min_lat, max_lon, max_lat]
+    bbox: list[float]  # [min_lon, min_lat, max_lon, max_lat]
     
     def __post_init__(self):
         """Validate country data format"""
@@ -37,7 +36,7 @@ class CountryRegistry:
     """Global registry for country lookups and operations"""
     
     @staticmethod
-    def get_country(identifier: str) -> Optional[CountryInfo]:
+    def get_country(identifier: str) -> CountryInfo | None:
         """
         Get country information by ISO2, ISO3, or name
         
@@ -70,24 +69,24 @@ class CountryRegistry:
         return None
     
     @staticmethod
-    def list_countries() -> List[CountryInfo]:
+    def list_countries() -> list[CountryInfo]:
         """Get list of all available countries"""
         return list(COUNTRIES.values())
     
     @staticmethod
-    def list_regions() -> List[str]:
+    def list_regions() -> list[str]:
         """Get list of all available regions"""
         regions = set(country.region for country in COUNTRIES.values())
         return sorted(list(regions))
     
     @staticmethod
-    def get_countries_by_region(region: str) -> List[CountryInfo]:
+    def get_countries_by_region(region: str) -> list[CountryInfo]:
         """Get all countries in a specific region"""
         return [country for country in COUNTRIES.values() 
                 if country.region.lower() == region.lower()]
     
     @staticmethod
-    def get_bounding_boxes() -> Dict[str, List[float]]:
+    def get_bounding_boxes() -> dict[str, list[float]]:
         """Get dictionary of ISO2 codes to bounding boxes (for backward compatibility)"""
         return {iso2: country.bbox for iso2, country in COUNTRIES.items()}
     
@@ -97,7 +96,7 @@ class CountryRegistry:
         return CountryRegistry.get_country(code) is not None
     
     @staticmethod
-    def suggest_countries(partial: str) -> List[CountryInfo]:
+    def suggest_countries(partial: str) -> list[CountryInfo]:
         """Get list of countries matching partial name or code"""
         partial_lower = partial.lower()
         matches = []
@@ -113,7 +112,7 @@ class CountryRegistry:
 
 # Comprehensive country database with Natural Earth bounding boxes
 # Bounding boxes use [min_lon, min_lat, max_lon, max_lat] format
-COUNTRIES: Dict[str, CountryInfo] = {
+COUNTRIES: dict[str, CountryInfo] = {
     'AE': CountryInfo(
         name='United Arab Emirates',
         iso2='AE',

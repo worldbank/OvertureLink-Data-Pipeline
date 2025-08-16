@@ -11,8 +11,10 @@ import geopandas as gpd
 import pandas as pd
 import shapely.wkb as swkb
 
+from .cleanup import get_pid_temp_dir
 from .config import Config
 from .config.countries import CountryRegistry
+
 
 # Get country bounding boxes from centralized registry
 # Maintains backward compatibility with existing code patterns
@@ -36,10 +38,10 @@ def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute("INSTALL spatial; LOAD spatial;")
     
-    # Get project root directory for temp files
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    temp_dir = os.path.join(project_root, 'temp', 'duckdb')
-    os.makedirs(temp_dir, exist_ok=True)
+    # Get PID-isolated temp directory for DuckDB
+    temp_dir = get_pid_temp_dir() / 'duckdb'
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir_str = str(temp_dir).replace('\\', '/')
     
     # Advanced DuckDB configuration based on official performance guidelines
     duckdb_settings = secure_config.get_duckdb_settings()
@@ -54,8 +56,8 @@ def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
     con.execute(f"SET memory_limit='{optimized_memory}';")
     con.execute(f"SET threads={threads};")
     
-    # Temp directory configuration (use fast local storage)
-    con.execute(f"SET temp_directory='{temp_dir.replace(os.sep, '/')}';")
+    # Temp directory configuration (use PID-isolated directory)
+    con.execute(f"SET temp_directory='{temp_dir_str}';")
     con.execute("SET max_temp_directory_size='50GB';")  # Reasonable limit for temp files
     
     # S3 and remote file optimizations (only use settings that exist)
@@ -87,6 +89,7 @@ def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
     os.environ['DUCKDB_PROGRESS_BAR'] = '1'
     
     logging.info(f"DuckDB configured (advanced): {threads} threads @ {memory_per_thread}GB each, temp: {temp_dir}")
+    logging.debug(f"PID-isolated temp directory: {temp_dir}")
     return con
 
 

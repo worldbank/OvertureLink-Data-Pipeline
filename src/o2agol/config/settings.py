@@ -19,7 +19,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from arcgis.gis import GIS
 from dotenv import load_dotenv
@@ -63,11 +63,28 @@ class OvertureConfig:
 
 
 @dataclass
+class TempConfig:
+    """Temporary file management configuration."""
+    retention_hours: int = 24
+    warning_gb: int = 10
+    limit_gb: int = 20
+    
+    def __post_init__(self):
+        """Validate temp management configuration."""
+        if self.retention_hours < 0:
+            raise ValueError("Retention hours must be non-negative")
+        if self.warning_gb < 1:
+            raise ValueError("Warning threshold must be at least 1GB")
+        if self.limit_gb <= self.warning_gb:
+            raise ValueError("Size limit must be greater than warning threshold")
+
+
+@dataclass
 class ProcessingConfig:
     """DuckDB processing configuration."""
     memory_limit: str
     threads: int
-    temp_dir: str | None = None
+    temp_dir: Optional[str] = None
     
     def __post_init__(self):
         """Validate processing configuration."""
@@ -110,8 +127,8 @@ class Config:
     """
     
     def __init__(self, 
-                 environment: str | None = None,
-                 env_file: Path | None = None,
+                 environment: Optional[str] = None,
+                 env_file: Optional[Path] = None,
                  validate_on_init: bool = True):
         """
         Initialize configuration with secure credential loading.
@@ -131,6 +148,7 @@ class Config:
         self._load_agol_config()
         self._load_overture_config()
         self._load_processing_config()
+        self._load_temp_config()
         
         if validate_on_init:
             self.validate()
@@ -262,6 +280,21 @@ class Config:
         except ValueError as e:
             raise ConfigurationError(f"Invalid processing configuration: {e}")
     
+    def _load_temp_config(self) -> None:
+        """Load temporary file management configuration."""
+        retention_hours = int(os.getenv("TEMP_RETENTION_HOURS", "24"))
+        warning_gb = int(os.getenv("TEMP_SIZE_WARNING_GB", "10"))
+        limit_gb = int(os.getenv("TEMP_SIZE_LIMIT_GB", "20"))
+        
+        try:
+            self.temp = TempConfig(
+                retention_hours=retention_hours,
+                warning_gb=warning_gb,
+                limit_gb=limit_gb
+            )
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid temp management configuration: {e}")
+    
     def create_gis_connection(self) -> GIS:
         """
         Create authenticated ArcGIS Online connection.
@@ -308,6 +341,19 @@ class Config:
             settings['temp_directory'] = self.processing.temp_dir
         
         return settings
+    
+    def get_temp_settings(self) -> dict[str, Any]:
+        """
+        Get temp management configuration settings as dictionary.
+        
+        Returns:
+            Dictionary of temp management settings
+        """
+        return {
+            'retention_hours': self.temp.retention_hours,
+            'warning_gb': self.temp.warning_gb,
+            'limit_gb': self.temp.limit_gb
+        }
     
     def validate(self) -> None:
         """

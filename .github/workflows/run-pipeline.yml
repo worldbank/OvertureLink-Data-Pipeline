@@ -38,4 +38,9 @@ jobs:
           AGOL_CLIENT_SECRET: ${{ secrets.AGOL_CLIENT_SECRET }}
         run: |
           . .venv/bin/activate
-          python -c "print('Pipeline will run here. Country=${{ github.event.inputs.country || 'AFG' }}, Mode=${{ github.event.inputs.mode || 'initial' }}')"
+          python -c "print('Pipeline will run here. Country=${{ github.event.inputs.country || 'AFG' }}, Mode=${{ github.event.inputs.mode || 'initial' }}')"          
+      - name: Cleanup temp files
+        if: always()
+        run: |
+          . .venv/bin/activate
+          python -c "from src.o2agol.cleanup import cleanup_stale_files; cleanup_stale_files(0)"

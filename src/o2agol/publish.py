@@ -5,11 +5,13 @@ import os
 import tempfile
 
 import geopandas as gpd
-import pandas as pd  # make sure this import exists at the top
+import pandas as pd
 from arcgis.gis import GIS
 
 # Import secure configuration system
 from o2agol.config.settings import Config, ConfigurationError
+
+from .cleanup import get_pid_temp_dir  # make sure this import exists at the top
 
 
 def _login_gis_for_publish() -> GIS:
@@ -74,14 +76,13 @@ def _gdf_to_geojson_tempfile(gdf: gpd.GeoDataFrame) -> tempfile.NamedTemporaryFi
     Note:
         Caller is responsible for cleanup of temporary file
     """
-    # Get project temp directory (same pattern as duck.py)
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    temp_dir = os.path.join(project_root, 'temp')
-    os.makedirs(temp_dir, exist_ok=True)
+    # Get PID-isolated temp directory
+    temp_dir = get_pid_temp_dir()
+    temp_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create temp file in project directory and close handle to avoid Windows file locking
+    # Create temp file in PID-isolated directory and close handle to avoid Windows file locking
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False, 
-                                     dir=temp_dir, encoding="utf-8")
+                                     dir=str(temp_dir), encoding="utf-8")
     tmp_name = tmp.name
     tmp.close()  # Close handle before GeoPandas writes to avoid file locking on Windows
     

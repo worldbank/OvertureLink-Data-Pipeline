@@ -44,7 +44,7 @@ o2agol = "o2agol.cli:app"
 line-length = 100
 target-version = "py311"
 lint.select = ["E","F","I","UP","B","SIM"]
-lint.ignore = ["E501"]
+lint.ignore = ["E501", "UP045"]  # UP045: Typer doesn't support X | None syntax
 
 [tool.mypy]
 python_version = "3.11"
