@@ -1,8 +1,8 @@
 # src/pipeline/main.py
 
-from arcgis.gis import GIS
 # Import secure configuration system
 from o2agol.config.settings import Config, ConfigurationError
+
 
 def create_secure_gis_connection():
     """
@@ -67,7 +67,7 @@ def get_pipeline_configuration():
         'security_summary': config.get_security_summary()
     }
     
-    print(f"Pipeline Configuration:")
+    print("Pipeline Configuration:")
     print(f"   Environment: {pipeline_config['environment']}")
     print(f"   DuckDB Memory: {pipeline_config['duckdb_settings']['memory_limit']}")
     print(f"   DuckDB Threads: {pipeline_config['duckdb_settings']['threads']}")
@@ -88,7 +88,7 @@ def test_configuration():
         print("Configuration loaded successfully")
         
         # Test GIS connection
-        gis = create_secure_gis_connection()
+        create_secure_gis_connection()
         print("GIS connection successful")
         
         # Test configuration access
@@ -96,8 +96,8 @@ def test_configuration():
         print(f"DuckDB settings: {duckdb_settings}")
         
         # Test security summary
-        summary = config.get_security_summary()
-        print(f"Security validation passed")
+        config.get_security_summary()
+        print("Security validation passed")
         
         print("\nAll configuration tests passed!")
         return True
@@ -120,7 +120,7 @@ if __name__ == "__main__":
         duckdb_settings = pipeline_config['duckdb_settings']
         overture_base_url = pipeline_config['overture_config']['base_url']
         
-        print(f"\nExample usage:")
+        print("\nExample usage:")
         print(f"   GIS Portal: {gis.properties.portalName}")
         print(f"   DuckDB Memory: {duckdb_settings['memory_limit']}")
         print(f"   Overture URL: {overture_base_url}")

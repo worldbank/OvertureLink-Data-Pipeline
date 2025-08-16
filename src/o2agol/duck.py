@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
-import time
-import tempfile
 import platform
+import tempfile
+import time
 
 import duckdb
 import geopandas as gpd
@@ -29,7 +29,7 @@ def _parquet_url_from_config(overture_config: dict, theme: str, type_: str) -> s
 
 
 def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
-    """Configure DuckDB."""
+    """Configure DuckDB with optimized settings for spatial queries."""
     con = duckdb.connect()
     
     # Install required extensions
@@ -75,12 +75,12 @@ def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
     # Only set these if they exist in this DuckDB version
     try:
         con.execute("SET enable_http_metadata_cache=true;")
-    except:
+    except Exception:
         logging.debug("enable_http_metadata_cache not available in this DuckDB version")
         
     try:
         con.execute("SET s3_url_compatibility_mode=false;")
-    except:
+    except Exception:
         logging.debug("s3_url_compatibility_mode not available in this DuckDB version")
     
     # Set environment for progress reporting
@@ -187,7 +187,7 @@ def _fetch_gdf_attempt(config_obj, target_name: str, **kwargs) -> gpd.GeoDataFra
             logging.info(f"Using bbox for {iso2}: ({xmin}, {ymin}, {xmax}, {ymax})")
             
             parquet_url = _parquet_url_from_config(overture_config, target_config.get('theme'), target_config.get('type'))
-            sql = _build_optimized_query(parquet_url, xmin, ymin, xmax, ymax, target_config, limit)
+            sql = _build_bbox_query(parquet_url, xmin, ymin, xmax, ymax, target_config, limit)
         
         logging.info("Executing optimized query with two-step processing...")
         logging.info(f"SQL preview: {sql[:200]}...")
@@ -225,7 +225,7 @@ def _fetch_dual_query(con: duckdb.DuckDBPyConnection, overture_config: dict, tar
         iso2 = selector.get('iso2', 'AF').upper()
         xmin, ymin, xmax, ymax = COUNTRY_BBOXES[iso2]
         parquet_url = _parquet_url_from_config(overture_config, places_config.get('theme'), places_config.get('type'))
-        places_sql = _build_optimized_query(parquet_url, xmin, ymin, xmax, ymax, places_config, limit)
+        places_sql = _build_bbox_query(parquet_url, xmin, ymin, xmax, ymax, places_config, limit)
     
     places_gdf = _fetch_via_temp_file(con, places_sql)
     if len(places_gdf) > 0:
@@ -246,7 +246,7 @@ def _fetch_dual_query(con: duckdb.DuckDBPyConnection, overture_config: dict, tar
         iso2 = selector.get('iso2', 'AF').upper()
         xmin, ymin, xmax, ymax = COUNTRY_BBOXES[iso2]
         parquet_url = _parquet_url_from_config(overture_config, buildings_config.get('theme'), buildings_config.get('type'))
-        buildings_sql = _build_optimized_query(parquet_url, xmin, ymin, xmax, ymax, buildings_config, limit)
+        buildings_sql = _build_bbox_query(parquet_url, xmin, ymin, xmax, ymax, buildings_config, limit)
     
     buildings_gdf = _fetch_via_temp_file(con, buildings_sql)
     if len(buildings_gdf) > 0:
@@ -400,50 +400,6 @@ def _fetch_via_temp_file(con: duckdb.DuckDBPyConnection, sql: str) -> gpd.GeoDat
                     time.sleep(1)  # Wait before retry
 
 
-def _fetch_via_arrow(con: duckdb.DuckDBPyConnection, sql: str) -> gpd.GeoDataFrame:
-    """
-    Direct Arrow-based processing.
-    This is the primary optimization, created to avoid slow COPY TO operations.
-    """
-    start_time = time.time()
-    
-    # Modify query to include geometry as WKB in the result
-    arrow_sql = f"""
-    SELECT *, ST_AsWKB(geom) AS geometry_wkb
-    FROM ({sql})
-    """
-    
-    # Execute query and get Arrow result directly
-    result = con.execute(arrow_sql)
-    
-    # Try Arrow first (fastest)
-    try:
-        arrow_table = result.arrow()
-        df = arrow_table.to_pandas()
-        logging.info(f"Fetched {len(df):,} rows via Arrow in {time.time()-start_time:.1f}s")
-    except Exception as e:
-        # Fallback to fetchall if Arrow fails
-        logging.debug(f"Arrow conversion failed, using fetchall: {e}")
-        result = con.execute(arrow_sql)
-        df = pd.DataFrame(result.fetchall(), columns=[desc[0] for desc in result.description])
-        logging.info(f"Fetched {len(df):,} rows via fetchall in {time.time()-start_time:.1f}s")
-    
-    # Convert WKB geometry column to shapely geometries
-    if "geometry_wkb" in df.columns:
-        df["geometry"] = df["geometry_wkb"].apply(
-            lambda b: swkb.loads(bytes(b)) if b is not None else None
-        )
-        df = df.drop(columns=["geometry_wkb"])
-    
-    # Drop the original geom column if it exists
-    if "geom" in df.columns:
-        df = df.drop(columns=["geom"])
-    
-    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
-    
-    elapsed = time.time() - start_time
-    logging.info(f"Arrow processing completed: {len(gdf):,} features in {elapsed:.1f}s")
-    return gdf
 
 
 def _get_columns_for_target_type(target_type: str) -> list[str]:
@@ -485,7 +441,6 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
     
     # Use centralized column selection logic (optimized for projection pushdown)
     columns = _get_columns_for_target_type(target_type)
-    cols_sql = ", ".join(columns)
     
     # Get Overture data URLs using unified config
     data_url = f"{overture_config['base_url']}/theme={target_theme}/type={target_type}/*.parquet"
@@ -538,10 +493,10 @@ def _build_divisions_query(overture_config: dict, target_name: str, target_confi
     return sql
 
 
-def _build_optimized_query(parquet_url: str, xmin: float, ymin: float, xmax: float, ymax: float, 
-                          target_config: dict, limit: int = None) -> str:
+def _build_bbox_query(parquet_url: str, xmin: float, ymin: float, xmax: float, ymax: float, 
+                      target_config: dict, limit: int = None) -> str:
     """
-    Construct highly optimized SQL query with bounding box spatial filtering and projection pushdown.
+    Construct SQL query with bounding box spatial filtering and projection pushdown.
     """
     target_type = target_config.get('type')
     
@@ -577,47 +532,5 @@ def _build_optimized_query(parquet_url: str, xmin: float, ymin: float, xmax: flo
     return sql
 
 
-def validate_data_quality(gdf: gpd.GeoDataFrame, target_name: str, min_features: int = 100) -> bool:
-    """
-    Comprehensive data quality validation before publication.
-    """
-    errors = []
-    
-    # Validate feature count meets minimum requirements
-    if len(gdf) < min_features:
-        errors.append(f"Too few features: {len(gdf)} < {min_features}")
-    
-    # Validate required schema columns
-    required_cols = ['id', 'geometry']
-    missing_cols = [col for col in required_cols if col not in gdf.columns]
-    if missing_cols:
-        errors.append(f"Missing required columns: {missing_cols}")
-    
-    # Validate and standardize coordinate reference system
-    if gdf.crs is None:
-        errors.append("No CRS defined")
-    elif gdf.crs.to_string() != "EPSG:4326":
-        logging.warning(f"CRS is {gdf.crs}, reprojecting to EPSG:4326")
-        gdf = gdf.to_crs("EPSG:4326")
-    
-    # Assess geometry validity within acceptable thresholds
-    invalid_geoms = gdf.geometry.isna().sum()
-    invalid_pct = (invalid_geoms / len(gdf)) * 100
-    if invalid_pct > 5:  # 5% tolerance for invalid geometries
-        errors.append(f"Too many invalid geometries: {invalid_geoms} ({invalid_pct:.1f}%)")
-    
-    # Check for data integrity issues
-    duplicate_ids = gdf['id'].duplicated().sum()
-    if duplicate_ids > 0:
-        errors.append(f"Duplicate IDs found: {duplicate_ids}")
-    
-    if errors:
-        logging.error(f"Data validation failed for {target_name}:")
-        for error in errors:
-            logging.error(f"  - {error}")
-        return False
-    
-    logging.info(f"Data validation passed: {len(gdf):,} features, {invalid_pct:.1f}% invalid geometries")
-    return True
 
 

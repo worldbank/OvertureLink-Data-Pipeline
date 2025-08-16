@@ -27,6 +27,7 @@ dependencies = [
     
     # CLI and configuration
     "typer==0.12.3",
+    "click<8.2.0",  # Typer compatibility constraint
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
     

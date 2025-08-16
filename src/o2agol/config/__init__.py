@@ -4,12 +4,12 @@ World Bank compliant secure configuration system.
 """
 
 from .settings import (
+    AGOLCredentials,
     Config,
     ConfigurationError,
-    AGOLCredentials,
     OvertureConfig,
     ProcessingConfig,
-    get_gis_connection
+    get_gis_connection,
 )
 
 __all__ = [

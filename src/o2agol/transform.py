@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 import geopandas as gpd
@@ -101,7 +102,7 @@ def extract_primary_name(names_json) -> str:
             import json
             names = json.loads(names_json)
             return names.get('primary', names.get('common', list(names.values())[0] if names else None))
-    except:
+    except (json.JSONDecodeError, TypeError, KeyError):
         pass
     return str(names_json)[:100] if names_json else None
 
@@ -118,7 +119,7 @@ def extract_primary_category(categories_json) -> str:
             import json
             categories = json.loads(categories_json)
             return categories.get('primary')
-    except:
+    except (json.JSONDecodeError, TypeError, KeyError):
         pass
     return str(categories_json)[:50] if categories_json else None
 
@@ -137,7 +138,7 @@ def extract_first_website(websites_json) -> str:
             import json
             websites = json.loads(websites_json)
             return websites[0] if websites and isinstance(websites, list) else None
-    except:
+    except (json.JSONDecodeError, TypeError, KeyError):
         pass
     return None
 
@@ -178,6 +179,6 @@ def extract_formatted_address(addresses_json) -> str:
                     if addr.get('country'):
                         parts.append(addr['country'])
                     return ', '.join(parts) if parts else None
-    except:
+    except (json.JSONDecodeError, TypeError, KeyError):
         pass
     return None

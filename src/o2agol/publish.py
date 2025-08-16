@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import tempfile
-from typing import Optional
 
 import geopandas as gpd
 import pandas as pd  # make sure this import exists at the top
@@ -276,7 +274,7 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
         
         # Special handling for orphaned GeoJSON items
         if fl_item.type == "GeoJson":
-            logging.info(f"Found orphaned GeoJSON item - republishing as Feature Service")
+            logging.info("Found orphaned GeoJSON item - republishing as Feature Service")
             
             # Update the GeoJSON with new data and republish
             tmp = _gdf_to_geojson_tempfile(gdf)
@@ -443,7 +441,7 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
     raise ValueError(f"Unsupported mode: {mode}. Use 'initial', 'overwrite', or 'append'")
 
 
-def publish_multi_layer_service(layer_data: Dict[str, gpd.GeoDataFrame], tgt, mode: str = "auto"):
+def publish_multi_layer_service(layer_data: dict[str, gpd.GeoDataFrame], tgt, mode: str = "auto"):
     """
     Publish or update multi-layer feature service for combined Overture data.
     
@@ -820,7 +818,7 @@ def _update_existing_service(existing_service, combined_gdf, layer_data, gis: GI
             # Method 1: Try using append with correct ArcGIS API pattern
             try:
                 _append_via_item(feature_layer, data_to_upload, gis)
-                logging.info(f"Data append completed successfully")
+                logging.info("Data append completed successfully")
             except Exception as append_error:
                 logging.warning(f"Append via item failed: {append_error}")
                 

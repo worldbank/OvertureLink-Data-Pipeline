@@ -19,7 +19,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from arcgis.gis import GIS
 from dotenv import load_dotenv
@@ -67,7 +67,7 @@ class ProcessingConfig:
     """DuckDB processing configuration."""
     memory_limit: str
     threads: int
-    temp_dir: Optional[str] = None
+    temp_dir: str | None = None
     
     def __post_init__(self):
         """Validate processing configuration."""
@@ -110,8 +110,8 @@ class Config:
     """
     
     def __init__(self, 
-                 environment: Optional[str] = None,
-                 env_file: Optional[Path] = None,
+                 environment: str | None = None,
+                 env_file: Path | None = None,
                  validate_on_init: bool = True):
         """
         Initialize configuration with secure credential loading.
@@ -156,7 +156,7 @@ class Config:
         # Final fallback to current directory
         return Path.cwd()
     
-    def _load_environment_variables(self, env_file: Optional[Path]) -> None:
+    def _load_environment_variables(self, env_file: Path | None) -> None:
         """Load environment variables from appropriate source."""
         loaded_files = []
         
@@ -207,9 +207,12 @@ class Config:
         
         if not all([portal_url, username, password]):
             missing = []
-            if not portal_url: missing.append("AGOL_PORTAL_URL")
-            if not username: missing.append("AGOL_USERNAME")
-            if not password: missing.append("AGOL_PASSWORD")
+            if not portal_url:
+                missing.append("AGOL_PORTAL_URL")
+            if not username:
+                missing.append("AGOL_USERNAME")
+            if not password:
+                missing.append("AGOL_PASSWORD")
             
             raise ConfigurationError(
                 f"Missing required ArcGIS Online credentials: {', '.join(missing)}.\n"
@@ -289,7 +292,7 @@ class Config:
                 f"Please verify your credentials and portal URL."
             )
     
-    def get_duckdb_settings(self) -> Dict[str, Any]:
+    def get_duckdb_settings(self) -> dict[str, Any]:
         """
         Get DuckDB configuration settings as dictionary.
         
@@ -318,7 +321,7 @@ class Config:
         # Test ArcGIS connection
         try:
             gis = self.create_gis_connection()
-            gis.users.me  # Test API access
+            _ = gis.users.me  # Test API access
         except Exception as e:
             validation_errors.append(f"ArcGIS connection failed: {e}")
         
@@ -328,13 +331,13 @@ class Config:
         
         if validation_errors:
             raise ConfigurationError(
-                f"Configuration validation failed:\n" + 
+                "Configuration validation failed:\n" + 
                 "\n".join(f"  - {error}" for error in validation_errors)
             )
         
         logger.info("Configuration validation passed")
     
-    def get_security_summary(self) -> Dict[str, Any]:
+    def get_security_summary(self) -> dict[str, Any]:
         """
         Get security configuration summary for audit purposes.
         

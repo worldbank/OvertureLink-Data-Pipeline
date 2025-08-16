@@ -9,9 +9,6 @@ for troubleshooting spatial filtering issues in production environments.
 from __future__ import annotations
 
 import logging
-from typing import Optional
-
-import duckdb
 
 from .config import Config
 from .duck import setup_duckdb_optimized
@@ -97,7 +94,7 @@ def debug_divisions_afghanistan(secure_config: Config) -> str:
     """
 
 
-def execute_afghanistan_debug(secure_config: Config) -> Optional[dict]:
+def execute_afghanistan_debug(secure_config: Config) -> dict | None:
     """
     Execute Afghanistan divisions debug query and return results.
     

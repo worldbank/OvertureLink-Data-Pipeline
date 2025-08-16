@@ -2,7 +2,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Optional, Dict, Any
+from typing import Annotated, Any, Optional
 
 import typer
 import yaml
@@ -19,7 +19,7 @@ load_dotenv()
 app = typer.Typer(help="Overture to AGOL pipeline")
 
 
-def setup_logging(verbose: bool, target_name: str = None, mode: str = None, enable_file_logging: bool = False):
+def setup_logging(verbose: bool, target_name: Optional[str] = None, mode: Optional[str] = None, enable_file_logging: bool = False):
     """
     Configure logging with optional timestamped file output for production operations.
     
@@ -63,14 +63,14 @@ def is_template_config(config_path: str) -> bool:
     Template configs have top-level 'country' and 'templates' sections.
     """
     try:
-        with open(config_path, 'r') as f:
+        with open(config_path) as f:
             config = yaml.safe_load(f)
         return 'country' in config and 'templates' in config
     except Exception:
         return False
 
 
-def load_pipeline_config(config_path: str) -> Dict[str, Any]:
+def load_pipeline_config(config_path: str) -> dict[str, Any]:
     """
     Load pipeline configuration from YAML file and combine with secure credentials.
     Supports both legacy and enhanced config formats with templating.
@@ -133,7 +133,7 @@ def load_pipeline_config(config_path: str) -> Dict[str, Any]:
         if not config_file.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
         
-        with open(config_file, 'r') as f:
+        with open(config_file) as f:
             yaml_config = yaml.safe_load(f)
         
         # Extract required Overture settings from YAML
@@ -165,7 +165,7 @@ def load_pipeline_config(config_path: str) -> Dict[str, Any]:
     return pipeline_config
 
 
-def get_selector_config(cfg: Dict[str, Any], iso2: Optional[str] = None) -> Dict[str, Any]:
+def get_selector_config(cfg: dict[str, Any], iso2: Optional[str] = None) -> dict[str, Any]:
     """
     Extract or create selector configuration for spatial filtering.
     
@@ -191,7 +191,7 @@ def get_selector_config(cfg: Dict[str, Any], iso2: Optional[str] = None) -> Dict
     return selector
 
 
-def get_target_config(cfg: Dict[str, Any], target_name: str) -> Dict[str, Any]:
+def get_target_config(cfg: dict[str, Any], target_name: str) -> dict[str, Any]:
     """
     Extract target configuration for specified data type.
     
@@ -248,7 +248,7 @@ def process_target(
     dry_run: bool,
     verbose: bool,
     use_divisions: bool = True,
-    enable_file_logging: bool = False,
+    log_to_file: bool = False,
 ):
     """
     Execute data processing pipeline for specified target with comprehensive logging.
@@ -265,10 +265,10 @@ def process_target(
         dry_run: Execute validation without data publication
         verbose: Enable detailed logging output
         use_divisions: Use Overture Divisions for precise boundaries
-        enable_file_logging: Create timestamped log files
+        log_to_file: Create timestamped log files
     """
     # Initialize logging with optional file output
-    setup_logging(verbose, target_name, mode, enable_file_logging)
+    setup_logging(verbose, target_name, mode, log_to_file)
     
     # Log execution context for audit trails
     start_time = datetime.now()
@@ -289,7 +289,7 @@ def process_target(
         cmd_parts.append("--dry-run")
     if verbose:
         cmd_parts.append("--verbose")
-    if enable_file_logging:
+    if log_to_file:
         cmd_parts.append("--log-to-file")
     
     command_str = " ".join(cmd_parts)
@@ -320,7 +320,7 @@ def process_target(
         logging.info(f"Target theme: {target_config['theme']}, type: {target_config['type']}")
     except (KeyError, ValueError) as e:
         logging.error(str(e))
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     # Configure spatial filtering methodology
     bbox_only = not use_divisions

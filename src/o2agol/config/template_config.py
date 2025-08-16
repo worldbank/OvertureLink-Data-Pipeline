@@ -5,11 +5,12 @@ Supports dynamic templating and enterprise metadata standards
 
 import logging
 import re
-import yaml
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass
+from typing import Any
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class CountryConfig:
     iso2: str
     iso3: str
     region: str
-    bbox: List[float]
+    bbox: list[float]
 
 
 @dataclass 
@@ -42,7 +43,7 @@ class TargetMetadata:
     snippet: str
     description: str
     service_name: str
-    tags: List[str]
+    tags: list[str]
     
     # Essential metadata fields
     access_information: str
@@ -50,7 +51,7 @@ class TargetMetadata:
     
     # Technical configuration
     upsert_key: str
-    item_id: Optional[str] = None
+    item_id: str | None = None
 
 
 class TemplateConfigParser:
@@ -64,7 +65,7 @@ class TemplateConfigParser:
     - Professional tag and categorization
     """
     
-    def __init__(self, config_path: Union[str, Path]):
+    def __init__(self, config_path: str | Path):
         """Initialize parser with config file path"""
         self.config_path = Path(config_path)
         self.raw_config = None
@@ -82,7 +83,7 @@ class TemplateConfigParser:
         if not self.config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
         
-        with open(self.config_path, 'r', encoding='utf-8') as f:
+        with open(self.config_path, encoding='utf-8') as f:
             self.raw_config = yaml.safe_load(f)
         
         logger.debug(f"Loaded enhanced config from: {self.config_path}")
@@ -114,7 +115,7 @@ class TemplateConfigParser:
         self.overture = self.raw_config.get('overture', {})
         self.targets = self.raw_config.get('targets', {})
     
-    def get_template_variables(self, target_name: str, target_config: Dict[str, Any]) -> Dict[str, str]:
+    def get_template_variables(self, target_name: str, target_config: dict[str, Any]) -> dict[str, str]:
         """
         Generate template variables for a specific target
         
@@ -161,7 +162,7 @@ class TemplateConfigParser:
         
         return variables
     
-    def _resolve_template_string(self, template: str, variables: Dict[str, str]) -> str:
+    def _resolve_template_string(self, template: str, variables: dict[str, str]) -> str:
         """
         Resolve template string with variables
         
@@ -182,7 +183,7 @@ class TemplateConfigParser:
         
         return resolved
     
-    def _resolve_tags(self, tags_config: Union[str, List[str]], variables: Dict[str, str]) -> List[str]:
+    def _resolve_tags(self, tags_config: str | list[str], variables: dict[str, str]) -> list[str]:
         """
         Resolve tags configuration with template variables and concatenation
         
@@ -232,7 +233,7 @@ class TemplateConfigParser:
             return [tag.strip() for tag in resolved.split(',')]
         return [resolved]
     
-    def _resolve_template_reference(self, field_value: str, template_name: str, variables: Dict[str, str]) -> str:
+    def _resolve_template_reference(self, field_value: str, template_name: str, variables: dict[str, str]) -> str:
         """
         Resolve template reference - handles both direct templates and template variable references
         
@@ -348,7 +349,7 @@ class TemplateConfigParser:
         logger.debug(f"Generated metadata for target '{target_name}': {metadata.item_title}")
         return metadata
     
-    def get_selector_config(self) -> Dict[str, Any]:
+    def get_selector_config(self) -> dict[str, Any]:
         """Get selector configuration with ISO2 resolved"""
         selector = self.raw_config.get('selector', {})
         
@@ -359,11 +360,11 @@ class TemplateConfigParser:
         
         return selector
     
-    def get_overture_config(self) -> Dict[str, Any]:
+    def get_overture_config(self) -> dict[str, Any]:
         """Get Overture Maps configuration"""
         return self.overture.copy()
     
-    def get_target_filter_config(self, target_name: str) -> Dict[str, Any]:
+    def get_target_filter_config(self, target_name: str) -> dict[str, Any]:
         """
         Get data selection configuration for a target
         
@@ -383,7 +384,7 @@ class TemplateConfigParser:
             'filter': target_config.get('filter')
         }
     
-    def validate_config(self) -> List[str]:
+    def validate_config(self) -> list[str]:
         """
         Validate configuration completeness
         
@@ -418,7 +419,7 @@ class TemplateConfigParser:
         return issues
 
 
-def create_template_config_parser(config_path: Union[str, Path]) -> TemplateConfigParser:
+def create_template_config_parser(config_path: str | Path) -> TemplateConfigParser:
     """
     Factory function to create enhanced config parser
     
