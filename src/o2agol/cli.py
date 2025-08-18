@@ -18,6 +18,7 @@ from .cleanup import full_cleanup_check, register_cleanup_handlers
 from .config import Config
 from .config.template_config import TemplateConfigParser
 from .duck import fetch_gdf
+from .dump_manager import DumpManager, DumpConfig
 from .publish import publish_or_update
 from .transform import normalize_schema
 
@@ -996,6 +997,367 @@ def list_queries(
         raise typer.Exit(1)
 
 
+
+
+@app.command("overture-dump")
+def overture_dump(
+    query: Annotated[str, typer.Argument(help="Query type to execute. Use 'list-queries' command to see available options.")],
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
+    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name (e.g., 'af', 'afg', 'Afghanistan')")] = None,
+    download_only: Annotated[bool, typer.Option("--download-only", help="Only download dump without processing")] = False,
+    use_local: Annotated[bool, typer.Option("--use-local/--use-s3", help="Use local dump if available")] = True,
+    force_download: Annotated[bool, typer.Option("--force-download", help="Force re-download even if dump exists")] = False,
+    release: Annotated[str, typer.Option("--release", help="Overture release version")] = "2025-07-23.0",
+    output_format: Annotated[str, typer.Option("--format", help="Output format: agol or geojson")] = "agol",
+    output_path: Annotated[Optional[str], typer.Option("--output", help="Output GeoJSON file path (for geojson format)")] = None,
+    limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
+    log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without processing/publishing")] = False,
+    use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
+):
+    """
+    Process Overture data using local dumps for improved performance.
+    
+    This command downloads complete Overture themes once and reuses them for multiple 
+    countries/queries, providing 10-100x performance improvement for batch operations.
+    
+    The dump system downloads by Overture's six themes (addresses, base, buildings, 
+    divisions, places, transportation) and stores them locally in /overturedump/.
+    
+    Examples:
+        Download dump for theme (one-time operation):
+            o2agol overture-dump roads --country afg --download-only
+            
+        Process from local dump (fast, repeatable):
+            o2agol overture-dump roads --country afg
+            o2agol overture-dump roads --country pak  # Uses same dump
+            
+        Force fresh download:
+            o2agol overture-dump buildings --country afg --force-download
+            
+        Export to GeoJSON instead of AGOL:
+            o2agol overture-dump places --country afg --format geojson
+    """
+    # Validate query exists
+    if not validate_query_exists(config, query):
+        try:
+            available_queries = get_available_queries(config)
+            typer.echo(f"ERROR: Query '{query}' not found in configuration file '{config}'", err=True)
+            typer.echo(f"\nAvailable queries: {', '.join(sorted(available_queries))}", err=True)
+        except (FileNotFoundError, ValueError) as e:
+            typer.echo(f"ERROR loading configuration: {e}", err=True)
+        raise typer.Exit(1)
+    
+    # Validate output format
+    if output_format not in ["agol", "geojson"]:
+        typer.echo("ERROR: --format must be 'agol' or 'geojson'", err=True)
+        raise typer.Exit(1)
+    
+    # Validate parameter combinations
+    if output_format == "geojson" and dry_run:
+        typer.echo("ERROR: --dry-run is not supported with GeoJSON export", err=True)
+        raise typer.Exit(1)
+    
+    if output_format == "agol" and output_path:
+        typer.echo("ERROR: --output is only supported with --format geojson", err=True)
+        raise typer.Exit(1)
+    
+    if not country:
+        typer.echo("ERROR: --country is required for dump processing", err=True)
+        raise typer.Exit(1)
+    
+    # Setup logging
+    mode = "dump"
+    setup_logging(verbose, query, mode, log_to_file)
+    
+    # Load configuration to get theme information
+    cfg = load_pipeline_config(config, country)
+    target_config = get_target_config(cfg, query)
+    theme = target_config['theme']
+    
+    # Detect dual-theme queries (places + buildings)
+    building_filter = target_config.get('building_filter')
+    themes_to_download = [theme]
+    if building_filter:
+        themes_to_download.append('buildings')
+        logging.info(f"Dual-theme query detected: {query} requires themes {themes_to_download}")
+    
+    logging.info(f"Processing dump-based query: {query} (themes: {themes_to_download})")
+    logging.info(f"Release: {release}")
+    logging.info(f"Country: {country}")
+    logging.info(f"Output format: {output_format}")
+    
+    # Initialize dump manager
+    dump_manager = DumpManager()
+    
+    if dry_run:
+        logging.info("Dry run mode - validating configuration and dump access...")
+        # In dry run, check if dumps exist but don't download
+        missing_themes = []
+        for theme_to_download in themes_to_download:
+            if not dump_manager.check_dump_exists(release, theme_to_download):
+                missing_themes.append(theme_to_download)
+            else:
+                logging.info(f"Found existing {theme_to_download} dump")
+        
+        if missing_themes:
+            logging.info(f"Missing themes for dry run: {missing_themes}")
+            logging.info("Would download these themes in non-dry-run mode")
+            logging.info("Dry run complete - configuration valid but dumps need downloading.")
+            return
+        
+        # Test query with existing dumps
+        try:
+            from .dump_manager import DumpQuery
+            from .config.countries import CountryRegistry
+            
+            country_info = CountryRegistry.get_country(country)
+            if not country_info:
+                raise ValueError(f"Unknown country: {country}")
+            
+            test_query = DumpQuery(
+                theme=theme,
+                type=target_config['type'],
+                country=country_info.iso2,
+                limit=1
+            )
+            
+            result = dump_manager.query_local_dump(test_query, release)
+            logging.info(f"Dump validation successful. Would process {len(result)} features (test with limit=1)")
+            logging.info("Dry run complete.")
+            return
+            
+        except Exception as e:
+            logging.error(f"Dump validation failed: {e}")
+            raise typer.Exit(1)
+    
+    # Check/download all required themes (non-dry-run only)
+    for theme_to_download in themes_to_download:
+        if force_download or not dump_manager.check_dump_exists(release, theme_to_download):
+            if not force_download:
+                logging.info(f"Dump not found for {theme_to_download}, downloading...")
+            else:
+                logging.info(f"Force downloading {theme_to_download} dump...")
+            
+            try:
+                dump_manager.download_theme(release, theme_to_download)
+                logging.info(f"Successfully downloaded {theme_to_download} dump")
+            except Exception as e:
+                logging.error(f"Failed to download {theme_to_download} dump: {e}")
+                raise typer.Exit(1)
+        else:
+            logging.info(f"Using existing {theme_to_download} dump")
+    
+    if download_only:
+        logging.info("Download complete. Exiting.")
+        return
+    
+    # Process query using local dump
+    try:
+        from .dump_manager import DumpQuery
+        from .config.countries import CountryRegistry
+        
+        # Resolve country
+        country_info = CountryRegistry.get_country(country)
+        if not country_info:
+            raise ValueError(f"Unknown country: {country}")
+        
+        # Build query
+        query_obj = DumpQuery(
+            theme=theme,
+            type=target_config['type'],
+            country=country_info.iso2,
+            bbox=CountryRegistry.get_bounding_boxes().get(country_info.iso2) if not use_divisions else None,
+            filters=target_config.get('filters'),
+            limit=limit
+        )
+        
+        # Query local dump
+        logging.info("Querying local dump...")
+        query_result = dump_manager.query_local_dump(query_obj, release)
+        
+        # Handle both single GeoDataFrame and dual-query dict results
+        if isinstance(query_result, dict):
+            # Dual-query result (places + buildings)
+            logging.info(f"Dual-query result: {list(query_result.keys())}")
+            
+            total_features = sum(len(gdf) for gdf in query_result.values())
+            if total_features == 0:
+                logging.warning("No data found for dual query")
+                return
+            
+            logging.info(f"Found {total_features} total features across layers")
+            
+            # Transform each layer
+            transformed_data = {}
+            for layer_name, layer_gdf in query_result.items():
+                if not layer_gdf.empty:
+                    logging.info(f"Transforming {len(layer_gdf)} {layer_name} features...")
+                    transformed_data[layer_name] = normalize_schema(layer_gdf, query)
+            
+            if not transformed_data:
+                logging.warning("No valid data after transformation")
+                return
+            
+            # Output based on format
+            if output_format == "geojson":
+                if not output_path:
+                    output_path = generate_export_filename(query, country)
+                
+                logging.info(f"Exporting multi-layer data to {output_path}...")
+                # Use existing export_to_geojson which handles dict input
+                export_to_geojson(transformed_data, output_path, query)
+                logging.info(f"Export complete: {output_path}")
+                
+            else:  # agol format
+                logging.info("Publishing multi-layer service to ArcGIS Online...")
+                result_dict = publish_or_update(
+                    data=transformed_data,
+                    pipeline_config=cfg,
+                    target_name=query,
+                    mode="auto"
+                )
+                
+                if result_dict.get('success'):
+                    logging.info("Successfully published multi-layer service to ArcGIS Online")
+                    if result_dict.get('item_url'):
+                        logging.info(f"Item URL: {result_dict['item_url']}")
+                else:
+                    logging.error("Failed to publish multi-layer service to ArcGIS Online")
+                    raise typer.Exit(1)
+        
+        else:
+            # Single GeoDataFrame result
+            gdf = query_result
+            
+            if gdf.empty:
+                logging.warning("No data found for query")
+                return
+            
+            # Transform data
+            logging.info(f"Transforming {len(gdf)} features...")
+            gdf_transformed = normalize_schema(gdf, query)
+            
+            # Output based on format
+            if output_format == "geojson":
+                if not output_path:
+                    output_path = generate_export_filename(query, country)
+                
+                logging.info(f"Exporting to {output_path}...")
+                export_to_geojson(gdf_transformed, output_path, query)
+                logging.info(f"Export complete: {output_path}")
+                
+            else:  # agol format
+                logging.info("Publishing to ArcGIS Online...")
+                result_dict = publish_or_update(
+                    data=gdf_transformed,
+                    pipeline_config=cfg,
+                    target_name=query,
+                    mode="auto"
+                )
+                
+                if result_dict.get('success'):
+                    logging.info("Successfully published to ArcGIS Online")
+                    if result_dict.get('item_url'):
+                        logging.info(f"Item URL: {result_dict['item_url']}")
+                else:
+                    logging.error("Failed to publish to ArcGIS Online")
+                    raise typer.Exit(1)
+    
+    except Exception as e:
+        logging.error(f"Processing failed: {e}")
+        raise typer.Exit(1)
+    
+    finally:
+        dump_manager.close()
+
+
+@app.command("list-dumps")
+def list_dumps():
+    """
+    List all available local Overture dumps with metadata.
+    
+    Shows information about downloaded dumps including release version,
+    themes, download date, size, and validation status.
+    """
+    dump_manager = DumpManager()
+    
+    try:
+        dumps = dump_manager.get_available_dumps()
+        
+        if not dumps:
+            typer.echo("No local dumps found.")
+            typer.echo("Use 'o2agol overture-dump <query> --download-only' to download dumps.")
+            return
+        
+        typer.echo("Available Local Overture Dumps")
+        typer.echo("=" * 50)
+        
+        for dump in dumps:
+            typer.echo(f"\nRelease: {dump.release}")
+            typer.echo(f"  Themes: {', '.join(dump.themes)}")
+            typer.echo(f"  Downloaded: {dump.download_date}")
+            typer.echo(f"  Size: {dump.size_gb:.2f} GB")
+            typer.echo(f"  Complete: {'✓' if dump.is_complete else '✗'}")
+            typer.echo(f"  Spatial Index: {'✓' if dump.spatial_index_built else '✗'}")
+        
+        total_size = sum(dump.size_gb for dump in dumps)
+        typer.echo(f"\nTotal: {len(dumps)} dumps, {total_size:.2f} GB")
+        
+    except Exception as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(1)
+    
+    finally:
+        dump_manager.close()
+
+
+@app.command("validate-dump")
+def validate_dump(
+    release: Annotated[str, typer.Argument(help="Overture release version to validate")],
+    theme: Annotated[str, typer.Argument(help="Theme to validate")],
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
+):
+    """
+    Validate the integrity of a local Overture dump.
+    
+    Checks dump structure, metadata, and runs validation queries to ensure
+    the dump is complete and usable.
+    
+    Examples:
+        o2agol validate-dump 2025-07-23.0 buildings
+        o2agol validate-dump 2025-07-23.0 transportation --verbose
+    """
+    setup_logging(verbose)
+    
+    dump_manager = DumpManager()
+    
+    try:
+        logging.info(f"Validating dump: {release}/{theme}")
+        
+        # Check if dump exists
+        if not dump_manager.check_dump_exists(release, theme):
+            typer.echo(f"ERROR: Dump not found: {release}/{theme}", err=True)
+            raise typer.Exit(1)
+        
+        # Run validation
+        is_valid = dump_manager.validate_dump(release, theme)
+        
+        if is_valid:
+            typer.echo(f"✓ Dump validation successful: {release}/{theme}")
+            logging.info("All validation checks passed")
+        else:
+            typer.echo(f"✗ Dump validation failed: {release}/{theme}", err=True)
+            logging.error("One or more validation checks failed")
+            raise typer.Exit(1)
+    
+    except Exception as e:
+        typer.echo(f"ERROR during validation: {e}", err=True)
+        raise typer.Exit(1)
+    
+    finally:
+        dump_manager.close()
 
 
 @app.command("version")

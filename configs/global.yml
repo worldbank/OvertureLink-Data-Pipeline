@@ -2,9 +2,9 @@
 # Use with --country parameter to specify target country dynamically
 #
 # Usage Examples:
-#   python -m o2agol.cli health -c configs/global.yml --country afg --log-to-file --limit 10
-#   python -m o2agol.cli roads -c configs/global.yml --country pak --dry-run
-#   python -m o2agol.cli education -c configs/global.yml --country ind --use-bbox
+#   o2agol.cli arcgis-upload roads --dry-run --limit 50 --country afg --log-to-file
+#   o2agol.cli arcgis-upload roads --country pak --dry-run
+#   o2agol.cli arcgis-upload education --country ind --use-bbox
 
 # Data Source Configuration
 overture:

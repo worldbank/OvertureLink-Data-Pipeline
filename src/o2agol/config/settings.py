@@ -96,6 +96,28 @@ class ProcessingConfig:
             raise ValueError("Memory limit must end with MB, GB, or TB")
 
 
+@dataclass 
+class DumpConfig:
+    """Configuration for local Overture dump operations."""
+    base_path: str = "/overturedump"
+    max_memory_gb: int = 32
+    chunk_size: int = 5  # Countries per processing chunk
+    enable_spatial_index: bool = True
+    compression: str = "zstd"
+    partitioning: str = "hive"
+    
+    def __post_init__(self):
+        """Validate dump configuration."""
+        if self.max_memory_gb < 1:
+            raise ValueError("Memory limit must be at least 1GB")
+        if self.chunk_size < 1:
+            raise ValueError("Chunk size must be positive")
+        if self.compression.lower() not in ['zstd', 'gzip', 'snappy', 'lz4']:
+            raise ValueError("Compression must be one of: zstd, gzip, snappy, lz4")
+        if self.partitioning not in ['hive', 'none']:
+            raise ValueError("Partitioning must be 'hive' or 'none'")
+
+
 class ConfigurationError(Exception):
     """Raised when configuration is invalid or incomplete."""
     pass
@@ -149,6 +171,7 @@ class Config:
         self._load_overture_config()
         self._load_processing_config()
         self._load_temp_config()
+        self._load_dump_config()
         
         if validate_on_init:
             self.validate()
@@ -253,7 +276,7 @@ class Config:
     def _load_overture_config(self) -> None:
         """Load Overture Maps configuration with sensible defaults."""
         base_url = os.getenv("OVERTURE_BASE_URL", "s3://overturemaps-us-west-2/release")
-        release = os.getenv("OVERTURE_RELEASE", "2024-11-13.0")
+        release = os.getenv("OVERTURE_RELEASE", "2025-07-23.0")
         s3_region = os.getenv("OVERTURE_S3_REGION", "us-west-2")
         
         try:
@@ -294,6 +317,27 @@ class Config:
             )
         except ValueError as e:
             raise ConfigurationError(f"Invalid temp management configuration: {e}")
+    
+    def _load_dump_config(self) -> None:
+        """Load local dump configuration."""
+        base_path = os.getenv("OVERTURE_DUMP_PATH", "/overturedump")
+        max_memory_gb = int(os.getenv("DUMP_MAX_MEMORY", "32"))
+        chunk_size = int(os.getenv("DUMP_CHUNK_SIZE", "5"))
+        enable_spatial_index = os.getenv("DUMP_ENABLE_SPATIAL_INDEX", "true").lower() == "true"
+        compression = os.getenv("DUMP_COMPRESSION", "zstd")
+        partitioning = os.getenv("DUMP_PARTITIONING", "hive")
+        
+        try:
+            self.dump = DumpConfig(
+                base_path=base_path,
+                max_memory_gb=max_memory_gb,
+                chunk_size=chunk_size,
+                enable_spatial_index=enable_spatial_index,
+                compression=compression,
+                partitioning=partitioning
+            )
+        except ValueError as e:
+            raise ConfigurationError(f"Invalid dump configuration: {e}")
     
     def create_gis_connection(self) -> GIS:
         """
@@ -355,6 +399,22 @@ class Config:
             'limit_gb': self.temp.limit_gb
         }
     
+    def get_dump_settings(self) -> dict[str, Any]:
+        """
+        Get dump configuration settings as dictionary.
+        
+        Returns:
+            Dictionary of dump configuration settings
+        """
+        return {
+            'base_path': self.dump.base_path,
+            'max_memory_gb': self.dump.max_memory_gb,
+            'chunk_size': self.dump.chunk_size,
+            'enable_spatial_index': self.dump.enable_spatial_index,
+            'compression': self.dump.compression,
+            'partitioning': self.dump.partitioning
+        }
+    
     def validate(self) -> None:
         """
         Comprehensive configuration validation.
@@ -399,6 +459,8 @@ class Config:
             'overture_release': self.overture.release,
             'duckdb_memory': self.processing.memory_limit,
             'duckdb_threads': self.processing.threads,
+            'dump_base_path': self.dump.base_path,
+            'dump_max_memory': self.dump.max_memory_gb,
             'validation_status': 'passed'  # Only returned if validate() succeeded
         }
     

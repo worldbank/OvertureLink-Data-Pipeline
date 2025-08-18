@@ -1,15 +1,16 @@
 # Overture Maps Data to GeoJSON and ArcGIS Online Pipeline
 
 ## Purpose
-Choose your Overture query, specific the country, then you're done!
+Choose your Overture query, specific the country, then you're done! This code allows you to automatically query Overture data to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use.
 
 This is a cloud-native ETL pipeline to extract Overture Maps data (such as roads, buildings), transform to an AGOL-ready schema, and then allows you to choose to export to .geojson or publish as a feature layer in ArcGIS Online. This pipeline supports 176 countries worldwide, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases.
 
 ## Pipeline Overview
 - Configuration (`configs\global.yml`): Easily change metadata, choose the Overture release, or add your own queries.
-- Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3 with optimized spatial queries and Arrow processing for fast data access.
+- Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3 with spatial queries and for fast data access.
 - Transform (`transform.py`): Normalize schema/geometry, retain stable Overture/GERS IDs, define/delete/add metadata fields. Turns into an easy to use .geojson for exporting if you wish.
-- Publish (`publish.py`): ArcGIS Python API with smart detection - automatically creates new layers or updates existing ones with data and metadata.
+- Publish (`publish.py`): ArcGIS Python API with detection, automatically creates new layers or updates existing ones with data and metadata.
+- Data dump (`dump-manager.py`): Only for local data dumps. Checks to see if there is data by theme for Overture and downloads if needed.
 
 ## Requirements
 - Python 3.11+ (version must be compatiable with arcgis package)
@@ -37,13 +38,14 @@ On macOS/Linux:
 - No need to create country-specific config files, you can use the global config with a country argument
 
 ### 4. Run commands
+The Python CLI has three main commands: uploading to AGOL, downloading as geojson, or download dump for local use as needed.
 
 #### Upload to ArcGIS Online:
 - Example with Afghanistan country parameter:
    `o2agol arcgis-upload roads --country afg`
    
 - Or using module directly:
-   `python -m o2agol.cli arcgis-upload roads --country pak`
+   `python -m o2agol.cli arcgis-upload roads --country afg`
 
 #### Export to GeoJSON:
 - Export Afghanistan roads (auto-filename: afg_roads.geojson):
@@ -52,8 +54,19 @@ On macOS/Linux:
 - Or specify output file:
    `o2agol geojson-download roads afghanistan_roads.geojson --country afg`
 
+#### Download local dump for consistent use
+- Example with Afghanistan country parameter, detects and downloads local dump.
+   `o2agol overture-dump roads --country afg`
+
+### Review options
+- If needed you can always review options with the --help argument.
+- `o2agol --help`
+- `o2agol arcgis-upload --help`
+- `o2agol geojson-download --help`
+- `o2agol overture-dump --help`
+
 ### List Queries
-- You can list the available queries:
+- You can list the available queries with this command:
    `o2agol list-queries`
    or
    `python -m o2agol.cli list-queries`
@@ -111,7 +124,12 @@ To build your command, you need three elemenets:
 - `geojson-download` - Process and export data as GeoJSON file
 - Auto-generates filename if not specified: {iso3}_{query}.geojson
 
-### Choosing query
+#### Local Dump Processing 
+- `overture-dump` - Download Overture themes once, process many times
+- `list-dumps` - Show available local dumps with metadata
+- `validate-dump` - Verify dump integrity and completeness
+
+### Choosing a Query
 There are sets of queries prebuilt that you can find in the configs file but you can create your own. 
 
 #### Lines
@@ -128,7 +146,7 @@ There are sets of queries prebuilt that you can find in the configs file but you
 #### Polygons Only
 - `buildings` - Building footprints (all building polygons) 
 
-### Choosing country
+### Choosing a Country
 
 - `--country <code>` - Specify country by name, ISO2, or ISO3 code (e.g., `--country afghanistan`, `--country af`, `--country afg`)
 
@@ -167,9 +185,19 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - `o2agol geojson-download health usa_health.geojson --country usa --limit 1000` - USA health facilities to specific file
 - `o2agol geojson-download education --country pak --use-bbox --limit 100` - Fast export with bounding box
 
-### Legacy Config:
-- `o2agol arcgis-upload roads -c configs/afg.yml` - Process road networks using country-specific config
-- `o2agol geojson-download education -c configs/afg.yml` - Export Afghanistan education facilities using legacy config
+### Troubleshooting
+
+#### Common Issues
+- **Download fails**: Check internet connection and S3 access
+- **Validation errors**: Re-download with `--force-download`
+- **Memory errors**: Reduce `DUMP_MAX_MEMORY` or use `--limit`
+- **Disk space**: Use `o2agol list-dumps` to check space usage
+
+#### Performance Tips  
+- Use `--use-bbox` for development (faster spatial filtering)
+- Increase `DUMP_MAX_MEMORY` if you have available RAM
+- Download dumps to SSD for better query performance
+- Use `--limit` for development to reduce processing time
 
 ## CI/CD
 - `ci.yml`: lint, type-check, unit tests on PR/main.

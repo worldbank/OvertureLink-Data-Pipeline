@@ -93,18 +93,30 @@ def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def fetch_gdf(config_obj, target_name: str, **kwargs) -> gpd.GeoDataFrame:
+def fetch_gdf(config_obj, target_name: str, use_local_dump: bool = False, 
+              dump_manager=None, **kwargs) -> gpd.GeoDataFrame:
     """
-    Fetch geospatial data.
+    Fetch geospatial data with optional local dump support.
     
     Args:
         config_obj: Configuration object (adapted from CLI integration)
         target_name: Target data type (roads, buildings, places)
+        use_local_dump: Whether to use local dump if available
+        dump_manager: DumpManager instance for local queries
         **kwargs: Additional parameters including limit, use_divisions, etc.
         
     Returns:
         GeoDataFrame containing requested geospatial data
     """
+    # Check for local dump availability first
+    if use_local_dump and dump_manager:
+        try:
+            return _fetch_from_local_dump(config_obj, target_name, dump_manager, **kwargs)
+        except Exception as e:
+            logging.warning(f"Local dump query failed: {e}")
+            logging.info("Falling back to S3 query...")
+    
+    # Fall back to existing S3 implementation
     max_retries = kwargs.get('max_retries', 3)
     
     for attempt in range(max_retries):
@@ -556,5 +568,162 @@ def _build_bbox_query(parquet_url: str, xmin: float, ymin: float, xmax: float, y
     return sql
 
 
-
+def _fetch_from_local_dump(config_obj, target_name: str, dump_manager, **kwargs) -> gpd.GeoDataFrame:
+    """
+    Query local dump with spatial filtering for improved performance.
+    
+    Args:
+        config_obj: Configuration object
+        target_name: Target data type
+        dump_manager: DumpManager instance
+        **kwargs: Query parameters including limit, use_divisions, country, etc.
+        
+    Returns:
+        GeoDataFrame with query results
+    """
+    from .dump_manager import DumpQuery
+    from .config.countries import CountryRegistry
+    
+    logging.info("Fetching data from local dump...")
+    
+    # Extract configuration
+    secure_config, selector, targets, overture_config = _extract_config_data(config_obj)
+    target_config = targets[target_name]
+    
+    # Get parameters
+    limit = kwargs.get('limit')
+    use_divisions = kwargs.get('use_divisions', True)
+    country_override = kwargs.get('country')
+    
+    # Determine country
+    if country_override:
+        # Use country override from kwargs
+        country_info = CountryRegistry.get_country(country_override)
+        if not country_info:
+            raise ValueError(f"Unknown country: {country_override}")
+        iso2 = country_info.iso2
+    else:
+        # Use selector configuration
+        iso2 = selector.get('iso2')
+        if not iso2:
+            raise ValueError("No country specified in selector or kwargs")
+        iso2 = iso2.upper()
+    
+    logging.info(f"Querying local dump for country: {iso2}")
+    
+    # Build dump query
+    theme = target_config.get('theme')
+    type_ = target_config.get('type')
+    
+    if not theme or not type_:
+        raise ValueError(f"Missing theme ({theme}) or type ({type_}) in target configuration")
+    
+    # Get bounding box if using bbox mode
+    bbox = None
+    if not use_divisions:
+        country_bboxes = get_country_bboxes()
+        if iso2 in country_bboxes:
+            bbox = country_bboxes[iso2]
+            logging.info(f"Using bbox filtering: {bbox}")
+        else:
+            logging.warning(f"No bbox found for {iso2}, using divisions")
+            use_divisions = True
+    
+    # Create query object
+    query = DumpQuery(
+        theme=theme,
+        type=type_,
+        country=iso2,
+        bbox=bbox,
+        filters=target_config.get('filters'),
+        limit=limit
+    )
+    
+    # Get release version
+    release = overture_config.get('release', '2025-07-23.0')
+    
+    # Execute query
+    gdf = dump_manager.query_local_dump(query, release)
+    
+    if gdf.empty:
+        logging.warning("Local dump query returned no results")
+        return gdf
+    
+    # Apply additional target-specific filtering if needed
+    target_filter = target_config.get('filter')
+    if target_filter:
+        # Apply filter using pandas operations
+        original_count = len(gdf)
+        
+        try:
+            # Convert SQL-like filter to pandas query
+            # This is a simplified filter application - more complex filters may need custom handling
+            if 'class IN' in target_filter:
+                # Handle class IN (...) filters
+                import re
+                match = re.search(r"class IN \('([^']+)'\)", target_filter)
+                if match and 'class' in gdf.columns:
+                    allowed_classes = match.group(1).split("', '")
+                    gdf = gdf[gdf['class'].isin(allowed_classes)]
+            elif 'class =' in target_filter:
+                # Handle class = 'value' filters
+                match = re.search(r"class = '([^']+)'", target_filter)
+                if match and 'class' in gdf.columns:
+                    allowed_class = match.group(1)
+                    gdf = gdf[gdf['class'] == allowed_class]
+            
+            filtered_count = len(gdf)
+            if filtered_count != original_count:
+                logging.info(f"Applied target filter: {original_count} -> {filtered_count} features")
+                
+        except Exception as e:
+            logging.warning(f"Could not apply target filter '{target_filter}': {e}")
+    
+    # Handle dual queries (places + buildings) if needed
+    building_filter = target_config.get('building_filter')
+    if building_filter:
+        logging.info("Dual query detected - fetching buildings separately")
+        
+        # Check if buildings dump exists
+        if not dump_manager.check_dump_exists(release, 'buildings'):
+            logging.warning("Buildings dump not found for dual query - only returning places data")
+            logging.warning("Use: o2agol overture-dump <query> --download-only to download all required themes")
+            return gdf
+        
+        # Create buildings query
+        buildings_query = DumpQuery(
+            theme='buildings',
+            type='building', 
+            country=iso2,
+            bbox=bbox,
+            filters=None,  # Building filter applied later
+            limit=limit
+        )
+        
+        buildings_gdf = dump_manager.query_local_dump(buildings_query, release)
+        
+        if not buildings_gdf.empty:
+            # Apply building filter
+            try:
+                if 'categories' in building_filter and 'categories' in buildings_gdf.columns:
+                    # Filter buildings by categories (simplified)
+                    buildings_gdf = buildings_gdf[buildings_gdf['categories'].notna()]
+                
+                # Add source type identifier
+                gdf['source_type'] = 'place'
+                buildings_gdf['source_type'] = 'building'
+                
+                # Return combined result as dict for multi-layer processing
+                return {
+                    'places': gdf,
+                    'buildings': buildings_gdf
+                }
+                
+            except Exception as e:
+                logging.warning(f"Could not apply building filter: {e}")
+        else:
+            logging.warning("No buildings found for dual query")
+    
+    logging.info(f"Local dump query completed: {len(gdf)} features")
+    return gdf
 
