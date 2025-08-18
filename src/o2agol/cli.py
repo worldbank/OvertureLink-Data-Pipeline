@@ -178,6 +178,82 @@ def load_pipeline_config(config_path: str, country_override: str = None) -> dict
     return pipeline_config
 
 
+def get_available_queries(config_path: str) -> list[str]:
+    """
+    Discover all available queries from configuration file.
+    
+    Args:
+        config_path: Path to YAML configuration file
+        
+    Returns:
+        List of available query names
+        
+    Raises:
+        FileNotFoundError: If config file doesn't exist
+        ValueError: If config file is invalid
+    """
+    try:
+        config_file = Path(config_path)
+        if not config_file.exists():
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        
+        with open(config_file) as f:
+            config = yaml.safe_load(f)
+        
+        targets = config.get('targets', {})
+        if not targets:
+            raise ValueError(f"No targets found in configuration file: {config_path}")
+        
+        return list(targets.keys())
+    
+    except yaml.YAMLError as e:
+        raise ValueError(f"Invalid YAML in configuration file {config_path}: {e}")
+
+
+def validate_query_exists(config_path: str, query_name: str) -> bool:
+    """
+    Validate that a query exists in the configuration file.
+    
+    Args:
+        config_path: Path to YAML configuration file
+        query_name: Name of query to validate
+        
+    Returns:
+        True if query exists, False otherwise
+    """
+    try:
+        available_queries = get_available_queries(config_path)
+        return query_name in available_queries
+    except (FileNotFoundError, ValueError):
+        return False
+
+
+def get_query_info(config_path: str, query_name: str) -> dict[str, Any]:
+    """
+    Get detailed information about a specific query.
+    
+    Args:
+        config_path: Path to YAML configuration file
+        query_name: Name of query to get info for
+        
+    Returns:
+        Dictionary with query information
+        
+    Raises:
+        KeyError: If query not found
+        ValueError: If config is invalid
+    """
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    
+    targets = config.get('targets', {})
+    if query_name not in targets:
+        available = ', '.join(targets.keys())
+        raise KeyError(f"Query '{query_name}' not found. Available queries: {available}")
+    
+    return targets[query_name]
+
+
 def export_to_geojson(data, output_path: str, target_name: str) -> None:
     """Export transformed features to GeoJSON file.
     
@@ -353,16 +429,17 @@ def get_target_config(cfg: dict[str, Any], target_name: str) -> dict[str, Any]:
 def process_target(
     target_name: str,
     config: str,
-    mode: str,
-    limit: Optional[int],
-    iso2: Optional[str],
-    dry_run: bool,
-    verbose: bool,
+    output_mode: str,
+    mode: Optional[str] = None,
+    output_path: Optional[str] = None,
+    limit: Optional[int] = None,
+    iso2: Optional[str] = None,
+    dry_run: bool = False,
+    verbose: bool = False,
     use_divisions: bool = True,
     log_to_file: bool = False,
     country: Optional[str] = None,
     skip_cleanup: bool = False,
-    export_geojson: Optional[str] = None,
 ):
     """
     Execute data processing pipeline for specified target with comprehensive logging.
@@ -373,20 +450,32 @@ def process_target(
     Args:
         target_name: Data target identifier (roads, buildings, etc.)
         config: Path to YAML configuration file
-        mode: Processing mode (initial, overwrite, append)
+        output_mode: Output mode - "agol" for ArcGIS Online, "geojson" for file export
+        mode: Processing mode (initial, overwrite, append) - only used for "agol" mode
+        output_path: GeoJSON file path - only used for "geojson" mode
         limit: Optional feature limit for testing and development
         iso2: ISO2 country code override (legacy)
-        dry_run: Execute validation without data publication
+        dry_run: Execute validation without data publication - only used for "agol" mode
         verbose: Enable detailed logging output
         use_divisions: Use Overture Divisions for precise boundaries
         log_to_file: Create timestamped log files
         country: Country code/name for global config mode
         skip_cleanup: Skip temp file cleanup for debugging
-        export_geojson: Export results as GeoJSON file instead of publishing to AGOL
     """
-    # Validate parameter combinations
-    if dry_run and export_geojson:
-        logging.error("Cannot use both --dry-run and --export-geojson flags together")
+    # Validate parameter combinations based on output mode
+    if output_mode == "geojson":
+        if dry_run:
+            logging.error("--dry-run is not supported with GeoJSON export")
+            raise typer.Exit(1)
+        if mode and mode != "auto":
+            logging.error("--mode is not relevant for GeoJSON export")
+            raise typer.Exit(1)
+    elif output_mode == "agol":
+        if output_path:
+            logging.error("output_path should only be provided for GeoJSON export")
+            raise typer.Exit(1)
+    else:
+        logging.error(f"Invalid output_mode: {output_mode}. Must be 'agol' or 'geojson'")
         raise typer.Exit(1)
     
     # Initialize logging with optional file output
@@ -406,9 +495,19 @@ def process_target(
     logging.info(f"Execution timestamp: {start_time}")
     
     # Log the original Python command for reproducibility
-    cmd_parts = ["python", "-m", "o2agol.cli", target_name, "-c", config]
-    if mode != "auto":
-        cmd_parts.extend(["--mode", mode])
+    if output_mode == "agol":
+        cmd_parts = ["python", "-m", "o2agol.cli", "arcgis-upload", target_name, "-c", config]
+        if mode and mode != "auto":
+            cmd_parts.extend(["--mode", mode])
+        if dry_run:
+            cmd_parts.append("--dry-run")
+    else:  # geojson mode
+        cmd_parts = ["python", "-m", "o2agol.cli", "geojson-download", target_name]
+        if output_path:
+            cmd_parts.append(output_path)
+        cmd_parts.extend(["-c", config])
+    
+    # Add common parameters
     if limit:
         cmd_parts.extend(["--limit", str(limit)])
     if iso2:
@@ -417,14 +516,10 @@ def process_target(
         cmd_parts.extend(["--country", country])
     if not use_divisions:
         cmd_parts.append("--use-bbox")
-    if dry_run:
-        cmd_parts.append("--dry-run")
     if verbose:
         cmd_parts.append("--verbose")
     if log_to_file:
         cmd_parts.append("--log-to-file")
-    if export_geojson:
-        cmd_parts.extend(["--export-geojson", export_geojson])
     
     command_str = " ".join(cmd_parts)
     logging.info(f"Original command: {command_str}")
@@ -554,16 +649,16 @@ def process_target(
             gdf = normalize_schema(gdf, target_name)
             logging.info(f"Schema normalization completed: {len(gdf):,} features processed")
 
-        # Handle GeoJSON export if requested
-        if export_geojson:
+        # Handle output based on mode
+        if output_mode == "geojson":
             logging.info("=" * 50)
             logging.info("GEOJSON EXPORT PHASE")
             logging.info("=" * 50)
             
             if is_dual_query:
-                export_to_geojson(normalized_data, export_geojson, target_name)
+                export_to_geojson(normalized_data, output_path, target_name)
             else:
-                export_to_geojson(gdf, export_geojson, target_name)
+                export_to_geojson(gdf, output_path, target_name)
             
             logging.info("GeoJSON export completed successfully")
             return
@@ -646,9 +741,47 @@ def process_target(
         raise
 
 
-@app.command("roads")
-def roads(
-    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
+def generate_export_filename(query: str, country: str = None) -> str:
+    """
+    Generate default export filename using {iso3}_{query}.geojson pattern
+    
+    Args:
+        query: Query name (e.g., 'education', 'roads')
+        country: Country identifier (ISO2, ISO3, or name)
+        
+    Returns:
+        Generated filename string
+    """
+    if country:
+        from .config.countries import CountryRegistry
+        try:
+            country_info = CountryRegistry.get_country(country)
+            if country_info:
+                iso3 = country_info.iso3
+                export_filename = f"{iso3.lower()}_{query}.geojson"
+                logging.info(f"Generated default export filename: {export_filename}")
+                return export_filename
+            else:
+                # Fallback if country not found
+                export_filename = f"{country}_{query}.geojson"
+                logging.warning(f"Country '{country}' not found in registry, using fallback filename: {export_filename}")
+                return export_filename
+        except (AttributeError, ValueError) as e:
+            # Fallback if country lookup fails
+            export_filename = f"{country}_{query}.geojson"
+            logging.warning(f"Could not resolve ISO3 for '{country}' ({e}), using fallback filename: {export_filename}")
+            return export_filename
+    else:
+        # Use generic filename if no country specified
+        export_filename = f"{query}.geojson"
+        logging.info(f"No country specified, using generic filename: {export_filename}")
+        return export_filename
+
+
+@app.command("arcgis-upload")
+def arcgis_upload(
+    query: Annotated[str, typer.Argument(help="Query type to execute. Use 'list-queries' command to see available options.")],
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
@@ -658,154 +791,211 @@ def roads(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
-    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
 ):
     """
-    Process road network data from Overture Maps for publication to ArcGIS Online.
-
-    Supports both country-specific configs and global config with --country parameter.
-    Also supports both bounding box and Overture Divisions-based spatial filtering
-    for precise country boundary adherence.
+    Upload processed Overture Maps data to ArcGIS Online.
+    
+    Query types are defined in the configuration file under 'targets' section.
+    Standard queries include: roads, buildings, places, education, health, markets
+    
+    Uses configs/global.yml by default. Users can add custom queries by defining 
+    new targets in their configuration file. Each query must specify at minimum: 
+    theme, type, and optional filter parameters.
     
     Examples:
-      Global config (recommended):
-        python -m o2agol.cli roads -c configs/global.yml --country af --limit 1000
-        python -m o2agol.cli roads -c configs/global.yml --country pak --dry-run
-      
-      Country-specific config (legacy):
-        python -m o2agol.cli roads -c configs/afg.yml --limit 1000
-        python -m o2agol.cli roads -c configs/afg.yml --dry-run
-      
-      Production deployment:
-        python -m o2agol.cli roads -c configs/global.yml --country ind --use-divisions --log-to-file
+        Standard queries (using default global config):
+            o2agol arcgis-upload roads --country af
+            o2agol arcgis-upload education --country pak --limit 100
+            o2agol arcgis-upload buildings --country ind --dry-run
+            
+        With development options:
+            o2agol arcgis-upload health --country afg --use-bbox --limit 50
+            
+        Custom config file:
+            o2agol arcgis-upload my_custom_query -c configs/custom.yml --dry-run
     """
-    process_target("roads", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
+    # Validate that the query exists in the configuration
+    if not validate_query_exists(config, query):
+        try:
+            available_queries = get_available_queries(config)
+            typer.echo(f"ERROR: Query '{query}' not found in configuration file '{config}'", err=True)
+            typer.echo(f"\nAvailable queries: {', '.join(sorted(available_queries))}", err=True)
+            if config == "configs/global.yml":
+                typer.echo("\nTip: Use 'python -m o2agol.cli list-queries' to see detailed information about each query.", err=True)
+            else:
+                typer.echo(f"\nTip: Use 'python -m o2agol.cli list-queries -c {config}' to see detailed information about each query.", err=True)
+        except (FileNotFoundError, ValueError) as e:
+            typer.echo(f"ERROR loading configuration: {e}", err=True)
+        raise typer.Exit(1)
+    
+    # Log which query is being executed
+    logging.info(f"Executing Overture query: {query}")
+    
+    # Execute the query using existing process_target function
+    process_target(
+        target_name=query,
+        config=config,
+        output_mode="agol",
+        mode=mode,
+        output_path=None,
+        limit=limit,
+        iso2=iso2,
+        dry_run=dry_run,
+        verbose=verbose,
+        use_divisions=use_divisions,
+        log_to_file=log_to_file,
+        country=country,
+        skip_cleanup=skip_cleanup
+    )
 
 
-@app.command("buildings")
-def buildings(
-    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
+@app.command("geojson-download")
+def geojson_download(
+    query: Annotated[str, typer.Argument(help="Query type to execute. Use 'list-queries' command to see available options.")],
+    output_path: Annotated[Optional[str], typer.Argument(help="Output GeoJSON file path (optional - will auto-generate if not provided)")] = None,
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
     country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
-    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
 ):
     """
-    Process building footprint data from Overture Maps for publication to ArcGIS Online.
-
-    Supports global config with --country parameter and bounding box/Divisions spatial filtering.
-    Optimized for large-scale building datasets with enterprise-grade error handling.
+    Download processed Overture Maps data as GeoJSON file.
+    
+    Query types are defined in the configuration file under 'targets' section.
+    Standard queries include: roads, buildings, places, education, health, markets
+    
+    If no output path is specified, a filename will be auto-generated using the 
+    pattern: {iso3}_{query}.geojson (e.g., afg_roads.geojson)
     
     Examples:
-      python -m o2agol.cli buildings -c configs/global.yml --country bd --limit 1000
+        Auto-generated filename:
+            o2agol geojson-download roads --country af
+            o2agol geojson-download education --country pak --limit 100
+            
+        Specify output file:
+            o2agol geojson-download buildings afghanistan_buildings.geojson --country af
+            
+        With development options:
+            o2agol geojson-download health --country afg --use-bbox --limit 50
+            
+        Custom config file:
+            o2agol geojson-download my_custom_query output.geojson -c configs/custom.yml
     """
-    process_target("buildings", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
+    # Validate that the query exists in the configuration
+    if not validate_query_exists(config, query):
+        try:
+            available_queries = get_available_queries(config)
+            typer.echo(f"ERROR: Query '{query}' not found in configuration file '{config}'", err=True)
+            typer.echo(f"\nAvailable queries: {', '.join(sorted(available_queries))}", err=True)
+            if config == "configs/global.yml":
+                typer.echo("\nTip: Use 'python -m o2agol.cli list-queries' to see detailed information about each query.", err=True)
+            else:
+                typer.echo(f"\nTip: Use 'python -m o2agol.cli list-queries -c {config}' to see detailed information about each query.", err=True)
+        except (FileNotFoundError, ValueError) as e:
+            typer.echo(f"ERROR loading configuration: {e}", err=True)
+        raise typer.Exit(1)
+    
+    # Auto-generate filename if not provided
+    if not output_path:
+        output_path = generate_export_filename(query, country)
+        
+    # Log which query is being executed
+    logging.info(f"Executing Overture query: {query}")
+    logging.info(f"Output file: {output_path}")
+    
+    # Execute the query using existing process_target function
+    process_target(
+        target_name=query,
+        config=config,
+        output_mode="geojson",
+        mode=None,
+        output_path=output_path,
+        limit=limit,
+        iso2=iso2,
+        dry_run=False,
+        verbose=verbose,
+        use_divisions=use_divisions,
+        log_to_file=log_to_file,
+        country=country,
+        skip_cleanup=skip_cleanup
+    )
 
 
-@app.command("places")
-def places(
-    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
-    limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
-    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
-    use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
-    log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
-    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
-    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
+@app.command("list-queries")
+def list_queries(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
 ):
     """
-    Process points of interest data from Overture Maps for publication to ArcGIS Online.
-
-    Supports global config with --country parameter for processing place categories.
+    List all available Overture queries in the configuration file.
+    
+    Shows detailed information about each query including theme, type, filter,
+    and description to help users understand what data each query retrieves.
     
     Examples:
-      python -m o2agol.cli places -c configs/global.yml --country in --limit 500
+        python -m o2agol.cli list-queries -c configs/global.yml
+        python -m o2agol.cli list-queries -c configs/custom.yml
     """
-    process_target("places", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
+    try:
+        queries = get_available_queries(config)
+        
+        if not queries:
+            typer.echo(f"WARNING: No queries found in configuration file: {config}")
+            raise typer.Exit(1)
+        
+        # Load full config for detailed information
+        with open(config) as f:
+            config_data = yaml.safe_load(f)
+        
+        typer.echo("Available Overture Queries")
+        typer.echo("=" * 50)
+        
+        for query_name in sorted(queries):
+            target = config_data['targets'][query_name]
+            theme = target.get('theme', 'N/A')
+            type_ = target.get('type', 'N/A')
+            filter_ = target.get('filter', None)
+            building_filter = target.get('building_filter', None)
+            description = target.get('sector_description', target.get('description', None))
+            
+            # Query name header
+            typer.echo(f"\n* {query_name}")
+            typer.echo(f"   Theme: {theme}")
+            typer.echo(f"   Type: {type_}")
+            
+            if filter_:
+                typer.echo(f"   Filter: {filter_}")
+            
+            if building_filter:
+                typer.echo(f"   Building Filter: {building_filter}")
+            
+            if description:
+                typer.echo(f"   Description: {description}")
+        
+        typer.echo(f"\nFound {len(queries)} available queries")
+        if config == "configs/global.yml":
+            typer.echo("\nUsage:")
+            typer.echo("  Upload to ArcGIS Online: o2agol arcgis-upload <query_name> [options]")
+            typer.echo("  Export to GeoJSON:      o2agol geojson-download <query_name> [options]")
+        else:
+            typer.echo("\nUsage:")
+            typer.echo(f"  Upload to ArcGIS Online: o2agol arcgis-upload <query_name> -c {config} [options]")
+            typer.echo(f"  Export to GeoJSON:      o2agol geojson-download <query_name> -c {config} [options]")
+        
+    except FileNotFoundError:
+        typer.echo(f"ERROR: Configuration file not found: {config}", err=True)
+        raise typer.Exit(1)
+    except yaml.YAMLError as e:
+        typer.echo(f"ERROR: Invalid YAML in configuration file: {e}", err=True)
+        raise typer.Exit(1)
+    except Exception as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(1)
 
 
-@app.command("education")
-def education(
-    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
-    limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
-    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
-    use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
-    log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
-    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
-    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
-):
-    """
-    Process education facilities from Overture Maps for publication to ArcGIS Online.
-
-    Supports global config with --country parameter for educational institution mapping.
-    
-    Examples:
-      python -m o2agol.cli education -c configs/global.yml --country ng --limit 100
-    """
-    process_target("education", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
-
-
-@app.command("health")
-def health(
-    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
-    limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
-    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
-    use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
-    log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
-    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
-    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
-):
-    """
-    Process health and medical facilities from Overture Maps for publication to ArcGIS Online.
-
-    Supports global config with --country parameter for healthcare facility mapping.
-    
-    Examples:
-      python -m o2agol.cli health -c configs/global.yml --country et --limit 50
-    """
-    process_target("health", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
-
-
-@app.command("markets")
-def markets(
-    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")],
-    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
-    limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
-    iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
-    country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
-    use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
-    log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
-    skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
-    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
-):
-    """
-    Process markets and retail establishments from Overture Maps for publication to ArcGIS Online.
-
-    Supports global config with --country parameter for commercial facility mapping.
-    
-    Examples:
-      python -m o2agol.cli markets -c configs/global.yml --country br --limit 200
-    """
-    process_target("markets", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
 
 
 @app.command("version")

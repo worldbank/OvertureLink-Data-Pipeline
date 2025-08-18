@@ -23,8 +23,8 @@ organization:
 # Global Content Templates (Using dynamic variables)
 # Country data will be injected dynamically based on --country parameter
 templates:
-  title: "{country_name} {sector_title} Overture Maps"
-  snippet: "{country_name} {sector_description} from Overture Maps."
+  title: "{country_name} {sector_title}"
+  snippet: "{country_name} {sector_description} with open data from Overture Maps Foundations."
   service_name: "{iso3}_{sector_tag}"
   description: "
     {sector_title} data for {country_name} from Overture Maps {release} release.<br><br>
