@@ -25,6 +25,26 @@ def get_pid_temp_dir() -> Path:
     return pid_dir
 
 
+def is_directory_tree_empty(directory: Path) -> bool:
+    """
+    Check if directory tree contains no files anywhere (subdirectories allowed if empty).
+    
+    Args:
+        directory: Path to directory to check
+        
+    Returns:
+        True if directory tree contains no files, False otherwise
+    """
+    try:
+        for item in directory.rglob("*"):
+            if item.is_file():
+                return False
+        return True
+    except (OSError, PermissionError):
+        # If we can't access the directory, assume it's not empty for safety
+        return False
+
+
 def cleanup_stale_files(retention_hours: int = 24) -> int:
     """
     Remove temp files older than retention period.
@@ -52,14 +72,22 @@ def cleanup_stale_files(retention_hours: int = 24) -> int:
             except (OSError, PermissionError) as e:
                 logging.warning(f"Could not remove stale file {item}: {e}")
                 
-    # Remove empty PID directories
+    # Remove empty PID directories (including those with empty subdirectories)
+    # But preserve the current process's PID directory
+    current_pid = os.getpid()
+    current_pid_dir = temp_dir / f"pid_{current_pid}"
+    
     for pid_dir in temp_dir.glob("pid_*"):
-        if pid_dir.is_dir() and not any(pid_dir.iterdir()):
+        # Skip current process's PID directory
+        if pid_dir == current_pid_dir:
+            continue
+            
+        if pid_dir.is_dir() and is_directory_tree_empty(pid_dir):
             try:
-                pid_dir.rmdir()
-                logging.debug(f"Removed empty PID directory: {pid_dir}")
-            except OSError:
-                pass
+                shutil.rmtree(pid_dir)
+                logging.debug(f"Removed empty PID directory tree: {pid_dir}")
+            except OSError as e:
+                logging.warning(f"Could not remove empty PID directory {pid_dir}: {e}")
                 
     if cleaned_count > 0:
         logging.info(f"Cleaned up {cleaned_count} stale temp files (>{retention_hours}h)")

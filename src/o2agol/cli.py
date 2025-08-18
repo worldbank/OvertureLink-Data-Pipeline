@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -176,6 +178,104 @@ def load_pipeline_config(config_path: str, country_override: str = None) -> dict
     return pipeline_config
 
 
+def export_to_geojson(data, output_path: str, target_name: str) -> None:
+    """Export transformed features to GeoJSON file.
+    
+    Args:
+        data: GeoDataFrame or dict of GeoDataFrames (for multi-layer)
+        output_path: Path where GeoJSON file will be saved
+        target_name: Target data type for metadata
+        
+    Raises:
+        IOError: If file cannot be written
+        ValueError: If features are not valid
+    """
+    # Ensure directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # Handle both single GeoDataFrame and multi-layer dict
+    if isinstance(data, dict):
+        # Multi-layer: combine all features
+        all_features = []
+        layer_counts = {}
+        
+        for layer_name, gdf in data.items():
+            layer_features = gdf.to_json()
+            layer_data = json.loads(layer_features)
+            
+            # Add layer identifier to each feature
+            for feature in layer_data.get("features", []):
+                feature["properties"]["layer"] = layer_name
+            
+            all_features.extend(layer_data.get("features", []))
+            layer_counts[layer_name] = len(layer_data.get("features", []))
+        
+        # Create combined GeoJSON
+        geojson_data = {
+            "type": "FeatureCollection",
+            "features": all_features,
+            "metadata": {
+                "generated": datetime.utcnow().isoformat(),
+                "source": "overture-agol-pipeline",
+                "target": target_name,
+                "layers": layer_counts,
+                "total_count": len(all_features)
+            }
+        }
+    else:
+        # Single GeoDataFrame
+        features_json = data.to_json()
+        features_data = json.loads(features_json)
+        
+        geojson_data = {
+            "type": "FeatureCollection",
+            "features": features_data.get("features", []),
+            "metadata": {
+                "generated": datetime.utcnow().isoformat(),
+                "source": "overture-agol-pipeline", 
+                "target": target_name,
+                "count": len(features_data.get("features", []))
+            }
+        }
+    
+    # Write with proper encoding and formatting
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(geojson_data, f, indent=2, ensure_ascii=False)
+    
+    # Validate written file
+    if not validate_geojson_file(output_path):
+        raise ValueError(f"Generated GeoJSON file is invalid: {output_path}")
+    
+    logging.info(f"GeoJSON export completed: {len(geojson_data['features']):,} features written to {output_path}")
+
+
+def validate_geojson_file(filepath: str) -> bool:
+    """Validate that exported GeoJSON file is properly formatted."""
+    try:
+        with open(filepath, encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # Basic GeoJSON structure validation
+        if data.get("type") != "FeatureCollection":
+            logging.error("Invalid GeoJSON: missing FeatureCollection type")
+            return False
+        
+        if "features" not in data:
+            logging.error("Invalid GeoJSON: missing features array")
+            return False
+        
+        if not isinstance(data["features"], list):
+            logging.error("Invalid GeoJSON: features must be an array")
+            return False
+        
+        return True
+    except Exception as e:
+        logging.error(f"GeoJSON validation failed: {e}")
+        return False
+
+
 def get_selector_config(cfg: dict[str, Any], iso2: Optional[str] = None) -> dict[str, Any]:
     """
     Extract or create selector configuration for spatial filtering.
@@ -262,6 +362,7 @@ def process_target(
     log_to_file: bool = False,
     country: Optional[str] = None,
     skip_cleanup: bool = False,
+    export_geojson: Optional[str] = None,
 ):
     """
     Execute data processing pipeline for specified target with comprehensive logging.
@@ -280,7 +381,14 @@ def process_target(
         use_divisions: Use Overture Divisions for precise boundaries
         log_to_file: Create timestamped log files
         country: Country code/name for global config mode
+        skip_cleanup: Skip temp file cleanup for debugging
+        export_geojson: Export results as GeoJSON file instead of publishing to AGOL
     """
+    # Validate parameter combinations
+    if dry_run and export_geojson:
+        logging.error("Cannot use both --dry-run and --export-geojson flags together")
+        raise typer.Exit(1)
+    
     # Initialize logging with optional file output
     setup_logging(verbose, target_name, mode, log_to_file)
     
@@ -315,6 +423,8 @@ def process_target(
         cmd_parts.append("--verbose")
     if log_to_file:
         cmd_parts.append("--log-to-file")
+    if export_geojson:
+        cmd_parts.extend(["--export-geojson", export_geojson])
     
     command_str = " ".join(cmd_parts)
     logging.info(f"Original command: {command_str}")
@@ -444,6 +554,20 @@ def process_target(
             gdf = normalize_schema(gdf, target_name)
             logging.info(f"Schema normalization completed: {len(gdf):,} features processed")
 
+        # Handle GeoJSON export if requested
+        if export_geojson:
+            logging.info("=" * 50)
+            logging.info("GEOJSON EXPORT PHASE")
+            logging.info("=" * 50)
+            
+            if is_dual_query:
+                export_to_geojson(normalized_data, export_geojson, target_name)
+            else:
+                export_to_geojson(gdf, export_geojson, target_name)
+            
+            logging.info("GeoJSON export completed successfully")
+            return
+
         logging.info("=" * 50)
         logging.info("DATA PUBLICATION PHASE")
         logging.info("=" * 50)
@@ -534,6 +658,7 @@ def roads(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
+    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
 ):
     """
     Process road network data from Overture Maps for publication to ArcGIS Online.
@@ -554,7 +679,7 @@ def roads(
       Production deployment:
         python -m o2agol.cli roads -c configs/global.yml --country ind --use-divisions --log-to-file
     """
-    process_target("roads", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
+    process_target("roads", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
 
 
 @app.command("buildings")
@@ -569,6 +694,7 @@ def buildings(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
+    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
 ):
     """
     Process building footprint data from Overture Maps for publication to ArcGIS Online.
@@ -579,7 +705,7 @@ def buildings(
     Examples:
       python -m o2agol.cli buildings -c configs/global.yml --country bd --limit 1000
     """
-    process_target("buildings", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
+    process_target("buildings", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
 
 
 @app.command("places")
@@ -594,6 +720,7 @@ def places(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
+    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
 ):
     """
     Process points of interest data from Overture Maps for publication to ArcGIS Online.
@@ -603,7 +730,7 @@ def places(
     Examples:
       python -m o2agol.cli places -c configs/global.yml --country in --limit 500
     """
-    process_target("places", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
+    process_target("places", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
 
 
 @app.command("education")
@@ -618,6 +745,7 @@ def education(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
+    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
 ):
     """
     Process education facilities from Overture Maps for publication to ArcGIS Online.
@@ -627,7 +755,7 @@ def education(
     Examples:
       python -m o2agol.cli education -c configs/global.yml --country ng --limit 100
     """
-    process_target("education", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
+    process_target("education", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
 
 
 @app.command("health")
@@ -642,6 +770,7 @@ def health(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
+    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
 ):
     """
     Process health and medical facilities from Overture Maps for publication to ArcGIS Online.
@@ -651,7 +780,7 @@ def health(
     Examples:
       python -m o2agol.cli health -c configs/global.yml --country et --limit 50
     """
-    process_target("health", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
+    process_target("health", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
 
 
 @app.command("markets")
@@ -666,6 +795,7 @@ def markets(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
+    export_geojson: Annotated[Optional[str], typer.Option("--export-geojson", help="Export results as GeoJSON file instead of publishing to AGOL. Cannot be used with --dry-run.")] = None,
 ):
     """
     Process markets and retail establishments from Overture Maps for publication to ArcGIS Online.
@@ -675,7 +805,7 @@ def markets(
     Examples:
       python -m o2agol.cli markets -c configs/global.yml --country br --limit 200
     """
-    process_target("markets", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup)
+    process_target("markets", config, mode, limit, iso2, dry_run, verbose, use_divisions, log_to_file, country, skip_cleanup, export_geojson)
 
 
 @app.command("version")
