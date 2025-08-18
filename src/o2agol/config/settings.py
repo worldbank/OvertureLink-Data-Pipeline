@@ -99,7 +99,7 @@ class ProcessingConfig:
 @dataclass 
 class DumpConfig:
     """Configuration for local Overture dump operations."""
-    base_path: str = "/overturedump"
+    base_path: str = "./overturedump"  # Relative to current working directory
     max_memory_gb: int = 32
     chunk_size: int = 5  # Countries per processing chunk
     enable_spatial_index: bool = True
@@ -320,7 +320,7 @@ class Config:
     
     def _load_dump_config(self) -> None:
         """Load local dump configuration."""
-        base_path = os.getenv("OVERTURE_DUMP_PATH", "/overturedump")
+        base_path = os.getenv("OVERTURE_DUMP_PATH", "./overturedump")
         max_memory_gb = int(os.getenv("DUMP_MAX_MEMORY", "32"))
         chunk_size = int(os.getenv("DUMP_CHUNK_SIZE", "5"))
         enable_spatial_index = os.getenv("DUMP_ENABLE_SPATIAL_INDEX", "true").lower() == "true"

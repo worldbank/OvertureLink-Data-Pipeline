@@ -1023,7 +1023,7 @@ def overture_dump(
     countries/queries, providing 10-100x performance improvement for batch operations.
     
     The dump system downloads by Overture's six themes (addresses, base, buildings, 
-    divisions, places, transportation) and stores them locally in /overturedump/.
+    divisions, places, transportation) and stores them locally in ./overturedump/.
     
     Examples:
         Download dump for theme (one-time operation):
@@ -1088,8 +1088,9 @@ def overture_dump(
     logging.info(f"Country: {country}")
     logging.info(f"Output format: {output_format}")
     
-    # Initialize dump manager
-    dump_manager = DumpManager()
+    # Initialize dump manager with configuration
+    dump_manager = DumpManager(config=cfg.secure_config.dump)
+    logging.info(f"Dump storage location: {dump_manager.base_path}")
     
     if dry_run:
         logging.info("Dry run mode - validating configuration and dump access...")
@@ -1281,7 +1282,10 @@ def list_dumps():
     Shows information about downloaded dumps including release version,
     themes, download date, size, and validation status.
     """
-    dump_manager = DumpManager()
+    # Initialize dump manager with environment-based configuration
+    from .config.settings import Config
+    temp_config = Config()  # This will load environment variables
+    dump_manager = DumpManager(config=temp_config.dump)
     
     try:
         dumps = dump_manager.get_available_dumps()
@@ -1331,7 +1335,10 @@ def validate_dump(
     """
     setup_logging(verbose)
     
-    dump_manager = DumpManager()
+    # Initialize dump manager with environment-based configuration
+    from .config.settings import Config
+    temp_config = Config()  # This will load environment variables
+    dump_manager = DumpManager(config=temp_config.dump)
     
     try:
         logging.info(f"Validating dump: {release}/{theme}")
