@@ -1,7 +1,7 @@
-# Overture Dump Guidance
+# Overture Country Dump Guidance
 Originally this code was built for individual country queries, however, when querying multiple times a local dump can be more efficient. 
 
-We've created the `overture-dump` command for this. Below is some guidance on it. These dumps can be very large files, so it may take a while on the first run.
+We've created the `overture-dump` command for this. Instead of a full dump, the command downloads a country's dump for size and speed purposes. Below is some guidance on it. These dumps can be large files, so it may take a while on the first run.
 
 ## Local Dump Processing:
 - `o2agol overture-dump roads --country afg --download-only` - Download transportation theme dump (one-time)
