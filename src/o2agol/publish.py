@@ -189,7 +189,10 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
 # Configuration constants for large dataset handling
 LARGE_DATASET_SEED_SIZE = int(os.environ.get('LARGE_DATASET_SEED_SIZE', '1000'))
 LARGE_DATASET_BATCH_SIZE = int(os.environ.get('LARGE_DATASET_BATCH_SIZE', '5000'))
-BUILDING_LARGE_THRESHOLD = int(os.environ.get('BUILDING_LARGE_THRESHOLD', '5000000'))
+BUILDING_LARGE_THRESHOLD = int(os.environ.get('BUILDING_LARGE_THRESHOLD', '10000000'))
+
+# Default capabilities for published feature services
+DEFAULT_CAPABILITIES = os.environ.get('AGOL_CAPABILITIES', 'Query,Create,Update,Delete')
 
 
 def _login_gis_for_publish() -> GIS:
@@ -420,14 +423,14 @@ def _create_feature_service(
             except Exception as analyze_error:
                 logging.warning(f"AGOL analyze failed, using basic parameters: {analyze_error}")
         
-        # Add/override with our optimized parameters (matching manual publish)
+        # Add/override with our optimized parameters (enabling monthly updates)
         feature_count = len(gdf)
         publish_params.update({
             'name': service_name,
-            'hasStaticData': True,
+            'hasStaticData': False,  # Enable dynamic updates for monthly refresh
             'maxRecordCount': 2000,  # Match manual publish exactly
             'layerInfo': {
-                'capabilities': 'Query'  # Match manual publish exactly
+                'capabilities': DEFAULT_CAPABILITIES  # Enable truncate-and-append workflows
             },
             'fieldTypesVersion': 'V2'  # Add missing parameter from manual publish
         })
