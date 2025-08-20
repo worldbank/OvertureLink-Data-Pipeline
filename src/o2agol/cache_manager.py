@@ -195,7 +195,7 @@ class CountryCacheManager:
             if query.limit:
                 gdf = gdf.head(query.limit)
             
-            logger.info(f"Retrieved {len(gdf):,} features from cache: {cache_file.name}")
+            logger.debug(f"Cache hit: {cache_file.name} ({len(gdf):,} features)")
             return gdf
             
         except Exception as e:
@@ -268,12 +268,12 @@ class CountryCacheManager:
         metadata_file.write_text(json.dumps(metadata.to_dict(), indent=2))
         
         elapsed = time.time() - start_time
-        logger.info(f"Cached {len(gdf):,} features in {elapsed:.1f}s: {cache_file.name}")
+        logger.debug(f"Cached {len(gdf):,} features in {elapsed:.1f}s: {cache_file.name}")
         
         # Apply limit to the result if specified in original query
         if query.limit:
             gdf = gdf.head(query.limit)
-            logger.info(f"Applied limit: returning {len(gdf):,} features")
+            logger.debug(f"Applied limit: returning {len(gdf):,} features")
         
         return gdf
     

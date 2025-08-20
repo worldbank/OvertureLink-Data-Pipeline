@@ -10,6 +10,11 @@ This cloud-native ETL pipeline allows you to query and extract Overture Maps dat
 - `geojson-download` - Download your query in .geojson format
 - `overture-dump` - Caches your query (by country / theme) for continued use without need for multiple downloads.
 
+### Features
+- Automatic AGOL discovery: The pipeline will either create a new feature layer or use truncate and append based on whether or not a feature layer already exists. 
+- Online and cache query: Query from Overture directly, or download a dump for consecutive uses.
+- Robust options: Custom configs, feature limits, debug logging, and more.
+
 ## Pipeline Overview
 - Configuration (`configs\global.yml`): Easily change metadata, choose the Overture release, or add your own queries.
 - Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3 with spatial queries and for data access.

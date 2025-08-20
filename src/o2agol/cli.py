@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from .cleanup import full_cleanup_check, register_cleanup_handlers
 from .config import Config
+from .config.settings import PipelineLogger, LogContext
 from .config.template_config import TemplateConfigParser
 from .duck import fetch_gdf
 from .dump_manager import DumpManager, DumpConfig
@@ -1111,33 +1112,38 @@ def overture_dump(
         logging.info(f"{phase_name} completed in {format_duration(duration)}")
         return duration
     
+    # Initialize pipeline logger
+    base_logger = logging.getLogger(__name__)
+    pipeline_logger = PipelineLogger(base_logger)
+    
+    # Capture original command for reference
+    import sys
+    original_command = " ".join(sys.argv)
+    
     # Start overall timing
     operation_start_time = time.time()
-    logging.info(f"Starting overture-dump operation: {query} for {country}")
-    logging.info(f"Execution timestamp: {datetime.now()}")
+    pipeline_logger.info(f"Command: {original_command}")
+    pipeline_logger.info(f"============ OVERTURE DUMP: {query.upper()} ============")
     
     # Phase timings
     phase_times = {}
-    
-    # === PHASE 1: CONFIGURATION & SETUP ===
-    phase1_start = log_phase_start("CONFIGURATION & SETUP")
     
     # Load configuration to get theme information
     cfg = load_pipeline_config(config, country)
     target_config = get_target_config(cfg, query)
     theme = target_config['theme']
     
+    # Get country info for display
+    from .config.countries import CountryRegistry
+    country_info = CountryRegistry.get_country(country)
+    
     # Detect dual-theme queries (places + buildings)
     building_filter = target_config.get('building_filter')
     themes_to_download = [theme]
     if building_filter:
         themes_to_download.append('buildings')
-        logging.info(f"Dual-theme query detected: {query} requires themes {themes_to_download}")
     
-    logging.info(f"Processing cache-based query: {query} (themes: {themes_to_download})")
-    logging.info(f"Release: {release}")
-    logging.info(f"Country: {country}")
-    logging.info(f"Output format: {output_format}")
+    pipeline_logger.info(f"Configuration: {country_info.name} ({country_info.iso3}) | Query: {query} | Release: {release}")
     
     # Create cache configuration from CLI parameters
     from .dump_manager import DumpConfig
@@ -1267,12 +1273,17 @@ def overture_dump(
             limit=limit
         )
         
-        # === PHASE 2: DATA ACQUISITION ===
-        phase2_start = log_phase_start("DATA ACQUISITION")
+        # === PHASE 1: DATA ACQUISITION ===
+        phase2_start = time.time()
+        pipeline_logger.info("")
+        pipeline_logger.phase("PHASE 1: DATA ACQUISITION")
         
         # Handle dual-theme queries directly
         if building_filter:
-            logging.info(f"Processing dual-theme query: places + buildings")
+            pipeline_logger.info("Retrieving education facilities (places + buildings)" if query == "education" 
+                               else "Retrieving health facilities (places + buildings)" if query == "health"
+                               else "Retrieving retail facilities (places + buildings)" if query == "markets"
+                               else f"Retrieving {query} facilities (places + buildings)")
             query_result = dump_manager.query_dual_theme(
                 query_obj, 
                 building_filter, 
@@ -1281,59 +1292,59 @@ def overture_dump(
                 force_download=force_download
             )
         else:
+            pipeline_logger.info(f"Retrieving {query} data")
             query_result = dump_manager.query_local_dump(query_obj, release, cfg, force_download=force_download)
-        
-        # End Phase 2
-        phase_times['data_acquisition'] = log_phase_end("DATA ACQUISITION", phase2_start)
         
         # Handle both single GeoDataFrame and dual-query dict results
         if isinstance(query_result, dict):
-            # Dual-query result (places + buildings)
-            logging.info(f"Dual-query result: {list(query_result.keys())}")
-            
             total_features = sum(len(gdf) for gdf in query_result.values())
             if total_features == 0:
-                logging.warning("No data found for dual query")
+                pipeline_logger.info("No data found for query")
                 return
             
-            logging.info(f"Found {total_features} total features across layers")
+            # Create feature summary
+            feature_summary = ", ".join([f"{len(gdf):,} {layer_name}" for layer_name, gdf in query_result.items()])
+            pipeline_logger.info(f"Acquired {total_features:,} features ({feature_summary})")
             
-            # === PHASE 3: DATA TRANSFORMATION ===
-            phase3_start = log_phase_start("DATA TRANSFORMATION")
+            # Add timing for data acquisition
+            phase_times['data_acquisition'] = time.time() - phase2_start
+            pipeline_logger.info(f"Phase completed in {format_duration(phase_times['data_acquisition'])}")
+            
+            # === PHASE 2: TRANSFORMATION ===
+            phase3_start = time.time()
+            pipeline_logger.info("")
+            pipeline_logger.phase("PHASE 2: TRANSFORMATION")
             
             # Transform each layer
             transformed_data = {}
             for layer_name, layer_gdf in query_result.items():
                 if not layer_gdf.empty:
-                    layer_transform_start = time.time()
-                    logging.info(f"Transforming {len(layer_gdf)} {layer_name} features...")
                     transformed_data[layer_name] = normalize_schema(layer_gdf, query)
-                    layer_transform_time = time.time() - layer_transform_start
-                    logging.info(f"Transformed {layer_name} in {format_duration(layer_transform_time)}")
             
             if not transformed_data:
-                logging.warning("No valid data after transformation")
+                pipeline_logger.info("No valid data after transformation")
                 return
             
-            # End Phase 3
-            phase_times['transformation'] = log_phase_end("DATA TRANSFORMATION", phase3_start)
+            pipeline_logger.info(f"Transformed {total_features:,} features")
+            phase_times['transformation'] = time.time() - phase3_start
+            pipeline_logger.info(f"Phase completed in {format_duration(phase_times['transformation'])}")
             
-            # === PHASE 4: OUTPUT ===
-            phase4_start = log_phase_start("OUTPUT")
+            # === PHASE 3: OUTPUT ===
+            phase4_start = time.time()
+            pipeline_logger.info("")
+            pipeline_logger.phase("PHASE 3: AGOL PUBLISHING" if output_format == "agol" else "PHASE 3: GEOJSON EXPORT")
             
             # Output based on format
             if output_format == "geojson":
                 if not output_path:
                     output_path = generate_export_filename(query, country)
                 
-                logging.info(f"Exporting multi-layer data to {output_path}...")
+                pipeline_logger.info(f"Exporting to {output_path}")
                 # Use existing export_to_geojson which handles dict input
                 export_to_geojson(transformed_data, output_path, query)
-                logging.info(f"Export complete: {output_path}")
+                pipeline_logger.info(f"Export complete: {output_path}")
                 
             else:  # agol format
-                logging.info("Publishing multi-layer service to ArcGIS Online...")
-                
                 # Create target configuration adapter (similar to single-theme approach)
                 target_config = cfg.get('targets', {}).get(query, {})
                 if cfg.get('config_format') == 'template':
@@ -1357,7 +1368,7 @@ def overture_dump(
                         'agol': type('AGOLConfig', (), agol_config_dict)()
                     })()
                     
-                    logging.info(f"Using template metadata: {template_metadata.item_title}")
+                    pipeline_logger.info(f"Found existing service: {template_metadata.item_title}")
                 else:
                     # Legacy config adapter
                     target_adapter = type('TargetConfig', (), {
@@ -1370,51 +1381,65 @@ def overture_dump(
                 
                 # publish_multi_layer_service returns the published item, not a dict
                 if result:
-                    logging.info("Successfully published multi-layer service to ArcGIS Online")
-                    logging.info(f"Item URL: {result.homepage}")
-                    logging.info(f"Item ID: {result.itemid}")
+                    # Extract layer info for display
+                    layers_info = []
+                    for layer_name, layer_gdf in transformed_data.items():
+                        layer_type = "points" if "places" in layer_name else "polygons"
+                        layers_info.append(f"Updated layer {country_info.iso3}_{query}_{layer_type} ({len(layer_gdf):,} features)")
+                    
+                    for info in layers_info:
+                        pipeline_logger.info(info)
+                    
+                    pipeline_logger.info(f"Published: {result.homepage}")
                 else:
-                    logging.error("Failed to publish multi-layer service to ArcGIS Online")
+                    pipeline_logger.info("Failed to publish service to ArcGIS Online")
                     raise typer.Exit(1)
             
-            # End Phase 4 for dual-theme
-            phase_times['output'] = log_phase_end("OUTPUT", phase4_start)
+            # End Phase 3 for dual-theme
+            phase_times['output'] = time.time() - phase4_start
+            pipeline_logger.info(f"Phase completed in {format_duration(phase_times['output'])}")
         
         else:
             # Single GeoDataFrame result
             gdf = query_result
             
             if gdf.empty:
-                logging.warning("No data found for query")
+                pipeline_logger.info("No data found for query")
                 return
             
-            # === PHASE 3: DATA TRANSFORMATION ===
-            phase3_start = log_phase_start("DATA TRANSFORMATION")
+            # Log single-theme acquisition
+            pipeline_logger.info(f"Acquired {len(gdf):,} features")
+            phase_times['data_acquisition'] = time.time() - phase2_start
+            pipeline_logger.info(f"Phase completed in {format_duration(phase_times['data_acquisition'])}")
+            
+            # === PHASE 2: TRANSFORMATION ===
+            phase3_start = time.time()
+            pipeline_logger.info("")
+            pipeline_logger.phase("PHASE 2: TRANSFORMATION")
             
             # Transform data
-            transform_start = time.time()
-            logging.info(f"Transforming {len(gdf)} features...")
             gdf_transformed = normalize_schema(gdf, query)
-            transform_time = time.time() - transform_start
-            logging.info(f"Transformation completed in {format_duration(transform_time)}")
+            pipeline_logger.info(f"Transformed {len(gdf):,} features")
             
-            # End Phase 3
-            phase_times['transformation'] = log_phase_end("DATA TRANSFORMATION", phase3_start)
+            # End Phase 2
+            phase_times['transformation'] = time.time() - phase3_start
+            pipeline_logger.info(f"Phase completed in {format_duration(phase_times['transformation'])}")
             
-            # === PHASE 4: OUTPUT ===
-            phase4_start = log_phase_start("OUTPUT")
+            # === PHASE 3: OUTPUT ===
+            phase4_start = time.time()
+            pipeline_logger.info("")
+            pipeline_logger.phase("PHASE 3: AGOL PUBLISHING" if output_format == "agol" else "PHASE 3: GEOJSON EXPORT")
             
             # Output based on format
             if output_format == "geojson":
                 if not output_path:
                     output_path = generate_export_filename(query, country)
                 
-                logging.info(f"Exporting to {output_path}...")
+                pipeline_logger.info(f"Exporting to {output_path}")
                 export_to_geojson(gdf_transformed, output_path, query)
-                logging.info(f"Export complete: {output_path}")
+                pipeline_logger.info(f"Export complete: {output_path}")
                 
             else:  # agol format
-                logging.info("Publishing to ArcGIS Online...")
                 
                 # Create target configuration adapter (similar to arcgis-upload command)
                 target_config = cfg.get('targets', {}).get(query, {})
@@ -1439,7 +1464,7 @@ def overture_dump(
                         'agol': type('AGOLConfig', (), agol_config_dict)()
                     })()
                     
-                    logging.info(f"Using template metadata: {template_metadata.item_title}")
+                    pipeline_logger.info(f"Found existing service: {template_metadata.item_title}")
                 else:
                     # Legacy config adapter
                     target_adapter = type('TargetConfig', (), {
@@ -1450,36 +1475,30 @@ def overture_dump(
                 
                 # publish_or_update returns the published item, not a dict
                 if result:
-                    logging.info("Successfully published to ArcGIS Online")
-                    logging.info(f"Item URL: {result.homepage}")
-                    logging.info(f"Item ID: {result.itemid}")
+                    pipeline_logger.info(f"Updated layer with {len(gdf_transformed):,} features")
+                    pipeline_logger.info(f"Published: {result.homepage}")
                 else:
-                    logging.error("Failed to publish to ArcGIS Online")
+                    pipeline_logger.info("Failed to publish to ArcGIS Online")
                     raise typer.Exit(1)
             
-            # End Phase 4 for single-theme
-            phase_times['output'] = log_phase_end("OUTPUT", phase4_start)
+            # End Phase 3 for single-theme
+            phase_times['output'] = time.time() - phase4_start
+            pipeline_logger.info(f"Phase completed in {format_duration(phase_times['output'])}")
         
         # === OPERATION SUMMARY ===
         total_duration = time.time() - operation_start_time
-        logging.info("=" * 60)
-        logging.info("OPERATION COMPLETE")
-        logging.info("=" * 60)
-        logging.info(f"Total execution time: {format_duration(total_duration)}")
-        logging.info("Performance breakdown:")
+        pipeline_logger.info("")
+        pipeline_logger.info("============ OPERATION COMPLETE ============")
+        pipeline_logger.info(f"Total execution time: {format_duration(total_duration)}")
+        pipeline_logger.info("Performance breakdown:")
         
-        # Calculate percentage for each phase
+        # Calculate percentage for each phase and show both seconds and percentage
         for phase_name, phase_duration in phase_times.items():
             percentage = (phase_duration / total_duration) * 100 if total_duration > 0 else 0
-            logging.info(f"  {phase_name.replace('_', ' ').title()}: {format_duration(phase_duration)} ({percentage:.1f}%)")
-        
-        # Add performance context
-        if total_duration < 60:
-            logging.info("Operation completed in less than one minute")
-        elif total_duration < 300:
-            logging.info("Standard operation completed successfully in less than 5 minutes")  
-        else:
-            logging.info("Extended operation completed (large dataset)")
+            formatted_phase = phase_name.replace('_', ' ').title().replace('Data ', '').replace('Acquisition', 'Acquisition')
+            if formatted_phase == 'Output':
+                formatted_phase = 'AGOL Publishing' if output_format == 'agol' else 'GeoJSON Export'
+            pipeline_logger.info(f"  {formatted_phase}: {format_duration(phase_duration)} ({percentage:.1f}%)")
     
     except Exception as e:
         # Calculate timing even for errors

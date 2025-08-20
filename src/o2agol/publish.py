@@ -48,138 +48,10 @@ class DatasetSize:
 from .cleanup import get_pid_temp_dir  # make sure this import exists at the top
 
 
-def diagnose_data_quality(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> dict:
-    """
-    Comprehensive data quality diagnostic for troubleshooting AGOL publishing failures.
-    
-    Returns detailed analysis of common issues that cause "Unknown error" in AGOL.
-    
-    Args:
-        gdf: GeoDataFrame to analyze
-        layer_name: Layer name for reporting
-        
-    Returns:
-        Dictionary with diagnostic results and recommendations
-    """
-    if gdf.empty:
-        return {"status": "empty", "issues": ["GeoDataFrame is empty"]}
-    
-    issues = []
-    recommendations = []
-    stats = {}
-    
-    # Geometry analysis
-    geom_types = gdf.geometry.geom_type.value_counts()
-    stats['geometry_types'] = geom_types.to_dict()
-    
-    # Null and empty geometry check
-    null_geoms = gdf.geometry.isna().sum()
-    empty_geoms = sum(1 for g in gdf.geometry if g is not None and g.is_empty)
-    
-    if null_geoms > 0:
-        issues.append(f"{null_geoms} null geometries")
-        recommendations.append("Remove null geometries before publishing")
-    
-    if empty_geoms > 0:
-        issues.append(f"{empty_geoms} empty geometries")
-        recommendations.append("Remove empty geometries before publishing")
-    
-    # Invalid geometry check
-    invalid_geoms = sum(1 for g in gdf.geometry if g is not None and not g.is_valid)
-    if invalid_geoms > 0:
-        issues.append(f"{invalid_geoms} invalid geometries")
-        recommendations.append("Repair invalid geometries using make_valid() or buffer(0)")
-    
-    # Polygon complexity analysis
-    if any(gt in ['Polygon', 'MultiPolygon'] for gt in geom_types.index):
-        complex_polys = []
-        coord_counts = []
-        
-        for geom in gdf.geometry:
-            if geom is not None and geom.geom_type in ['Polygon', 'MultiPolygon']:
-                coord_count = 0
-                if geom.geom_type == 'Polygon':
-                    coord_count = len(geom.exterior.coords)
-                    if geom.interiors:
-                        coord_count += sum(len(interior.coords) for interior in geom.interiors)
-                elif geom.geom_type == 'MultiPolygon':
-                    for poly in geom.geoms:
-                        coord_count += len(poly.exterior.coords)
-                        if poly.interiors:
-                            coord_count += sum(len(interior.coords) for interior in poly.interiors)
-                
-                coord_counts.append(coord_count)
-                if coord_count > 1000:
-                    complex_polys.append(coord_count)
-        
-        if coord_counts:
-            avg_coords = sum(coord_counts) / len(coord_counts)
-            max_coords = max(coord_counts)
-            stats['polygon_complexity'] = {
-                'avg_coordinates': avg_coords,
-                'max_coordinates': max_coords,
-                'complex_polygons': len(complex_polys)
-            }
-            
-            if max_coords > 2000:
-                issues.append(f"Extremely complex polygons detected (max: {max_coords} coordinates)")
-                recommendations.append("Simplify complex polygons using simplify() with appropriate tolerance")
-            elif len(complex_polys) > 0:
-                issues.append(f"{len(complex_polys)} complex polygons (>1000 coordinates)")
-                recommendations.append("Consider simplifying complex polygons to reduce AGOL processing load")
-    
-    # Attribute analysis
-    problematic_cols = []
-    for col in gdf.columns:
-        if col != 'geometry' and gdf[col].dtype == 'object':
-            # Check for nested JSON structures
-            sample_vals = gdf[col].dropna().head(100)
-            json_like_count = sum(1 for val in sample_vals if isinstance(val, str) and (val.startswith('{') or val.startswith('[')))
-            
-            if json_like_count > len(sample_vals) * 0.5:  # More than 50% look like JSON
-                problematic_cols.append(col)
-    
-    if problematic_cols:
-        issues.append(f"Columns with JSON-like data: {problematic_cols}")
-        recommendations.append("Extract or simplify JSON data in attribute columns")
-    
-    # CRS check
-    if gdf.crs is None:
-        issues.append("No CRS defined")
-        recommendations.append("Set CRS to EPSG:4326 for AGOL compatibility")
-    elif gdf.crs.to_epsg() != 4326:
-        issues.append(f"Non-standard CRS: {gdf.crs}")
-        recommendations.append("Reproject to EPSG:4326 for AGOL compatibility")
-    
-    # Size analysis
-    feature_count = len(gdf)
-    estimated_size_mb = feature_count * 0.5 / 1000  # Rough estimate
-    
-    stats['feature_count'] = feature_count
-    stats['estimated_size_mb'] = estimated_size_mb
-    
-    if feature_count > 1_000_000:
-        issues.append(f"Large dataset: {feature_count:,} features")
-        recommendations.append("Consider using seed-and-append strategy for datasets >1M features")
-    
-    # Overall assessment
-    critical_issues = [issue for issue in issues if any(keyword in issue.lower() 
-                      for keyword in ['invalid', 'null', 'empty', 'extremely complex'])]
-    
-    status = "critical" if critical_issues else ("warning" if issues else "good")
-    
-    return {
-        "status": status,
-        "issues": issues,
-        "recommendations": recommendations,
-        "stats": stats,
-        "layer_name": layer_name
-    }
-
 
 def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gpd.GeoDataFrame:
     """
-    Advanced geometry validation and cleaning for problematic Overture building data.
+    Advanced geometry validation and cleaning for all polygon data types.
     
     This function addresses the most common causes of AGOL "Unknown error" failures:
     1. Complex MultiPolygon structures with excessive coordinate counts
@@ -202,19 +74,19 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
     if gdf.empty:
         return gdf
     
-    logging.info(f"Validating and cleaning {len(gdf):,} geometries for {layer_name}")
+    logging.debug(f"Validating and cleaning {len(gdf):,} geometries for {layer_name}")
     original_count = len(gdf)
     
     # Step 1: Remove null geometries
     null_mask = gdf.geometry.isna()
     if null_mask.any():
-        logging.warning(f"Removing {null_mask.sum()} null geometries")
+        logging.debug(f"Removing {null_mask.sum()} null geometries")
         gdf = gdf[~null_mask].copy()
     
     # Step 2: Remove empty geometries  
     empty_mask = gdf.geometry.apply(lambda x: x.is_empty if x is not None else True)
     if empty_mask.any():
-        logging.warning(f"Removing {empty_mask.sum()} empty geometries")
+        logging.debug(f"Removing {empty_mask.sum()} empty geometries")
         gdf = gdf[~empty_mask].copy()
     
     # Step 3: Advanced polygon cleaning for all polygon data
@@ -289,7 +161,7 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
                 return None
         
         # Apply cleaning
-        logging.info("Applying advanced geometry cleaning for polygon data...")
+        logging.debug("Applying advanced geometry cleaning for polygon data...")
         cleaned_geoms = gdf.geometry.apply(clean_polygon_geometry)
         
         # Remove features with None geometries
@@ -298,7 +170,7 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
         removed_count = len(gdf) - cleaned_count
         
         if removed_count > 0:
-            logging.warning(f"Removed {removed_count} features with uncleanlable geometries")
+            logging.debug(f"Removed {removed_count} features with uncleanlable geometries")
             gdf = gdf[valid_mask].copy()
             gdf.geometry = cleaned_geoms[valid_mask]
         else:
@@ -308,9 +180,9 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
     removed_total = original_count - final_count
     
     if removed_total > 0:
-        logging.info(f"Geometry cleaning complete: {final_count:,} features remaining ({removed_total} removed)")
+        logging.debug(f"Geometry validation complete: {final_count:,} features ({removed_total} removed)")
     else:
-        logging.info(f"Geometry cleaning complete: {final_count:,} features validated")
+        logging.debug(f"Geometry validation complete: {final_count:,} features")
     
     return gdf
 
@@ -439,56 +311,6 @@ def _analyze_dataset_size(gdf: gpd.GeoDataFrame) -> DatasetSize:
     )
 
 
-def _get_large_dataset_publish_params(dataset_size: DatasetSize, service_name: str) -> PublishParams:
-    """
-    Generate optimized publishing parameters for large datasets.
-    
-    Uses dataset analysis to create parameters that avoid AGOL limitations
-    and optimize performance for large polygon datasets.
-    
-    Args:
-        dataset_size: Dataset analysis results
-        service_name: Service name for publishing
-        
-    Returns:
-        Optimized publish parameters
-    """
-    feature_count = dataset_size['feature_count']
-    geometry_type = dataset_size['geometry_type']
-    
-    # Base parameters optimized for large datasets
-    params: PublishParams = {
-        'name': service_name,
-        'hasStaticData': True,
-        'maxRecordCount': 5000,  # Standard maximum for query performance
-        'layerInfo': {
-            'capabilities': 'Query,Extract',
-            'hasStaticData': True,
-            'maxRecordCount': 5000
-        }
-    }
-    
-    # Polygon-specific optimizations
-    if geometry_type in ['Polygon', 'MultiPolygon']:
-        params['layerInfo']['geometryType'] = 'esriGeometryPolygon'
-        params['layerInfo']['hasZ'] = False
-        params['layerInfo']['hasM'] = False
-        
-        # For very large polygon datasets, reduce query limits
-        if feature_count > 5_000_000:
-            params['maxRecordCount'] = 2000
-            params['layerInfo']['maxRecordCount'] = 2000
-    
-    elif geometry_type in ['LineString', 'MultiLineString']:
-        params['layerInfo']['geometryType'] = 'esriGeometryPolyline'
-        
-    elif geometry_type in ['Point', 'MultiPoint']:
-        params['layerInfo']['geometryType'] = 'esriGeometryPoint'
-        # Points can handle larger query sizes
-        params['maxRecordCount'] = 10000
-        params['layerInfo']['maxRecordCount'] = 10000
-    
-    return params
 
 
 def _gdf_to_geojson_tempfile(gdf: gpd.GeoDataFrame) -> tempfile.NamedTemporaryFile:
@@ -764,13 +586,13 @@ def _initial_with_seed_and_append(
     service_name = tgt.agol.service_name
     title = tgt.agol.item_title
     
-    logging.info(f"Using seed-and-append strategy for large dataset: {feature_count:,} features")
+    logging.debug(f"Using seed-and-append strategy for large dataset: {feature_count:,} features")
     
     # PHASE 1: Create seed with small sample to establish schema
     seed_size = min(LARGE_DATASET_SEED_SIZE, feature_count)
     seed_gdf = gdf.head(seed_size)
     
-    logging.info(f"Creating service schema with seed sample: {seed_size:,} features")
+    logging.debug(f"Creating service schema with seed sample: {seed_size:,} features")
     
     # Prepare seed data for AGOL
     prepared_seed = _prepare_gdf_for_agol(seed_gdf, "single-layer")
@@ -1835,76 +1657,6 @@ def _prepare_gdf_for_agol(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gp
             logging.warning(f"Removing {null_count} null geometries from {layer_name}")
             prepared_gdf = prepared_gdf[~null_mask].copy()
     
-    # Enhanced polygon processing with complexity analysis
-    geom_types = prepared_gdf.geometry.geom_type.unique()
-    has_polygons = any(gt in ['Polygon', 'MultiPolygon'] for gt in geom_types)
-    
-    if has_polygons:
-        logging.debug(f"Processing polygon geometries for {layer_name}")
-        
-        # CRITICAL: Analyze and simplify complex polygons before AGOL publishing
-        from shapely.geometry import MultiPolygon, Polygon
-        import warnings
-        warnings.filterwarnings('ignore', category=UserWarning)
-        
-        def simplify_complex_polygon(geom, tolerance=0.0001):
-            """Simplify overly complex polygons that cause AGOL publishing failures"""
-            try:
-                if isinstance(geom, (Polygon, MultiPolygon)):
-                    # Count total coordinates to detect complexity
-                    coord_count = 0
-                    if isinstance(geom, Polygon):
-                        coord_count = len(geom.exterior.coords)
-                        if geom.interiors:
-                            coord_count += sum(len(interior.coords) for interior in geom.interiors)
-                    elif isinstance(geom, MultiPolygon):
-                        for poly in geom.geoms:
-                            coord_count += len(poly.exterior.coords)
-                            if poly.interiors:
-                                coord_count += sum(len(interior.coords) for interior in poly.interiors)
-                    
-                    # Simplify if overly complex (>1000 coordinates often cause AGOL failures)
-                    if coord_count > 1000:
-                        simplified = geom.simplify(tolerance, preserve_topology=True)
-                        # Ensure simplification didn't break the geometry
-                        if simplified.is_valid and not simplified.is_empty:
-                            return simplified
-                
-                # Convert single Polygon to MultiPolygon for consistency
-                if isinstance(geom, Polygon):
-                    return MultiPolygon([geom])
-                elif isinstance(geom, MultiPolygon):
-                    return geom
-                else:
-                    return geom
-            except Exception:
-                # If simplification fails, return original geometry
-                return geom
-        
-        # Apply simplification and normalization
-        prepared_gdf.geometry = prepared_gdf.geometry.apply(simplify_complex_polygon)
-        
-        # Log complexity statistics
-        sample_coords = []
-        for geom in prepared_gdf.geometry.head(100):
-            if isinstance(geom, (Polygon, MultiPolygon)):
-                coord_count = 0
-                if isinstance(geom, Polygon):
-                    coord_count = len(geom.exterior.coords)
-                elif isinstance(geom, MultiPolygon):
-                    for poly in geom.geoms:
-                        coord_count += len(poly.exterior.coords)
-                sample_coords.append(coord_count)
-        
-        if sample_coords:
-            avg_coords = sum(sample_coords) / len(sample_coords)
-            max_coords = max(sample_coords)
-            logging.info(f"Polygon complexity for {layer_name}: avg={avg_coords:.0f} coords, max={max_coords} coords")
-            if max_coords > 1000:
-                logging.warning(f"High complexity polygons detected - this may cause AGOL publishing issues")
-        
-        logging.debug(f"Processed and normalized polygons for {layer_name}")
-    
     # Note: Invalid geometry repair now handled by validate_and_clean_geometries
     # for polygon data, but keep basic validation for non-polygon data
     if not any(gt in ['Polygon', 'MultiPolygon'] for gt in prepared_gdf.geometry.geom_type.unique()):
@@ -1975,7 +1727,7 @@ def _prepare_gdf_for_agol(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gp
             logging.warning(f"Found {null_geom_count} null geometries after preparation")
         
         # Check for extremely small or degenerate geometries
-        if has_polygons:
+        if any(gt in ['Polygon', 'MultiPolygon'] for gt in prepared_gdf.geometry.geom_type.unique()):
             empty_geom_count = sum(1 for geom in prepared_gdf.geometry if geom.is_empty)
             if empty_geom_count > 0:
                 logging.warning(f"Found {empty_geom_count} empty geometries - these may cause publishing issues")

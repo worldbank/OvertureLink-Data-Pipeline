@@ -1091,7 +1091,7 @@ class DumpManager:
         if release == "latest":
             release = self._get_latest_release()
         
-        logger.info(f"Processing dual-theme query: places + buildings for {query.country}")
+        logger.debug(f"Processing dual-theme query internally for {query.country}")
         
         result = {}
         
@@ -1106,18 +1106,17 @@ class DumpManager:
             filters=query.filters
         )
         
-        logger.info(f"Querying places data for {query.country}")
+        logger.debug(f"Querying places data for {query.country}")
         if force_download:
             places_gdf = self._cache_manager.cache_country_data(places_query, config_obj, overwrite=True)
         else:
             places_gdf = self._cache_manager.get_cached_data(places_query)
             if places_gdf is None:
-                logger.info(f"Places cache miss - extracting data")
+                logger.debug(f"Places cache miss - extracting data")
                 places_gdf = self._cache_manager.cache_country_data(places_query, config_obj)
         
         if not places_gdf.empty:
             result['places'] = places_gdf
-            logger.info(f"Retrieved {len(places_gdf):,} places features")
         
         # Query 2: Buildings data - cache complete data, apply filter during retrieval
         # Create separate queries for caching and filtering
@@ -1141,7 +1140,7 @@ class DumpManager:
             filters=building_filter if building_filter else None  # Apply filter during retrieval
         )
         
-        logger.info(f"Querying buildings data for {query.country}")
+        logger.debug(f"Querying buildings data for {query.country}")
         if force_download:
             # Force recache complete buildings data (no filter)
             buildings_gdf = self._cache_manager.cache_country_data(buildings_cache_query, config_obj, overwrite=True)
@@ -1150,7 +1149,7 @@ class DumpManager:
                 original_count = len(buildings_gdf)
                 from .cache_manager import apply_sql_filter
                 buildings_gdf = apply_sql_filter(buildings_gdf, building_filter)
-                logger.info(f"Applied building filter: {original_count:,} -> {len(buildings_gdf):,} features")
+                logger.debug(f"Applied building filter: {original_count:,} -> {len(buildings_gdf):,} features")
             # Apply limit if specified
             if query.limit:
                 buildings_gdf = buildings_gdf.head(query.limit)
@@ -1158,7 +1157,7 @@ class DumpManager:
             # Try to get filtered data from cache
             buildings_gdf = self._cache_manager.get_cached_data(buildings_filter_query)
             if buildings_gdf is None:
-                logger.info(f"Buildings cache miss - extracting complete data")
+                logger.debug(f"Buildings cache miss - extracting complete data")
                 # Cache complete buildings data (no filter)
                 self._cache_manager.cache_country_data(buildings_cache_query, config_obj)
                 # Now get the filtered data
@@ -1166,10 +1165,9 @@ class DumpManager:
         
         if not buildings_gdf.empty:
             result['buildings'] = buildings_gdf  
-            logger.info(f"Retrieved {len(buildings_gdf):,} buildings features")
         
         total_features = sum(len(gdf) for gdf in result.values())
-        logger.info(f"Dual-theme query complete: {total_features:,} total features across {len(result)} layers")
+        logger.info(f"Dual-theme query complete: {total_features:,} features")
         
         return result
     
