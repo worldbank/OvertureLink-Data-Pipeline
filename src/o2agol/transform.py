@@ -7,21 +7,10 @@ import geopandas as gpd
 
 def sanitize_field_names(gdf: gpd.GeoDataFrame, layer_type: str = "generic") -> gpd.GeoDataFrame:
     """
-    Sanitize field names for AGOL compatibility by handling SQL reserved keywords
-    and length limits while preserving Overture semantic field names.
+    Sanitize field names for AGOL compatibility while preserving Overture's exact field names.
+    Only handles length limits and character cleanup - no renaming.
     """
-    # Only handle truly problematic SQL reserved keywords
-    RESERVED_KEYWORDS = {
-        'class': 'feature_class',  # SQL reserved word
-        'type': 'feature_type',    # SQL reserved word
-        'order': 'sort_order',     # SQL reserved word
-        'group': 'data_group'      # SQL reserved word
-    }
-    
-    # Preserve Overture field names - they have semantic meaning
-    # Only rename fields that cause technical issues, not semantic ones
-    
-    # Create mapping of old to new names
+    # Create mapping of old to new names for problematic cases only
     rename_mapping = {}
     
     for col in gdf.columns:
@@ -30,21 +19,17 @@ def sanitize_field_names(gdf: gpd.GeoDataFrame, layer_type: str = "generic") -> 
             
         new_name = col
         
-        # Handle reserved keywords only
-        if col.lower() in RESERVED_KEYWORDS:
-            new_name = RESERVED_KEYWORDS[col.lower()]
-        
         # Ensure field name length is under 31 characters (AGOL limit)
         if len(new_name) > 30:
             new_name = new_name[:30]
             
-        # Clean up any remaining issues
+        # Clean up any remaining character issues
         new_name = new_name.replace(' ', '_').replace('-', '_')
         
         if new_name != col:
             rename_mapping[col] = new_name
     
-    # Apply the renaming
+    # Apply the renaming only for length/character issues
     if rename_mapping:
         gdf = gdf.rename(columns=rename_mapping)
     
@@ -62,12 +47,12 @@ def normalize_schema(
 
     # Handle different layer types with appropriate field selection
     if layer in ["roads"]:
-        # Transportation data - use sanitized field names
-        keep = [c for c in ["id", "road_class", "subtype"] if c in gdf.columns]
+        # Transportation data - use original Overture field names and include useful attributes
+        keep = [c for c in ["id", "class", "subtype", "names", "road_surface", "road_flags", "speed_limits"] if c in gdf.columns]
         
     elif layer in ["buildings"]:
-        # Building data - use standard field names
-        keep = [c for c in ["id", "name", "feature_class", "subtype", "height", "floor_count"] if c in gdf.columns]
+        # Building data - use original Overture field names
+        keep = [c for c in ["id", "name", "class", "subtype", "height", "floor_count"] if c in gdf.columns]
         
     elif layer in ["education", "health", "markets", "places"]:
         # Mixed places and buildings data - handle unified schema
@@ -76,7 +61,7 @@ def normalize_schema(
         # Extract primary name from names JSON - vectorized for GeoPandas 1.0+
         if "names" in gdf.columns:
             # Use vectorized string operations where possible
-            gdf["name"] = gdf["names"].apply(extract_primary_name)
+            gdf.loc[:, "name"] = gdf["names"].apply(extract_primary_name)
             keep.append("name")
         
         # Handle source_type field (distinguishes places vs buildings)
@@ -85,9 +70,9 @@ def normalize_schema(
         
         # Create unified type_category field from places categories or building class
         # Optimized for GeoPandas 1.0+ with vectorized operations
-        if "categories" in gdf.columns or "feature_class" in gdf.columns:
+        if "categories" in gdf.columns or "class" in gdf.columns:
             # Initialize with None
-            gdf["type_category"] = None
+            gdf.loc[:, "type_category"] = None
             
             # Vectorized assignment for places
             if "categories" in gdf.columns and "source_type" in gdf.columns:
@@ -95,9 +80,9 @@ def normalize_schema(
                 gdf.loc[place_mask, "type_category"] = gdf.loc[place_mask, "categories"].apply(extract_primary_category)
             
             # Vectorized assignment for buildings
-            if "feature_class" in gdf.columns and "source_type" in gdf.columns:
+            if "class" in gdf.columns and "source_type" in gdf.columns:
                 building_mask = gdf["source_type"] == "building"
-                gdf.loc[building_mask, "type_category"] = gdf.loc[building_mask, "feature_class"]
+                gdf.loc[building_mask, "type_category"] = gdf.loc[building_mask, "class"]
             
             keep.append("type_category")
         
@@ -105,13 +90,18 @@ def normalize_schema(
         if "confidence" in gdf.columns:
             keep.append("confidence")
         
+        # Keep additional useful fields for places
+        for field in ["brand", "phones", "socials"]:
+            if field in gdf.columns:
+                keep.append(field)
+        
         # Extract contact information from complex fields (places only)
         if "websites" in gdf.columns:
-            gdf["website"] = gdf["websites"].apply(extract_first_website)
+            gdf.loc[:, "website"] = gdf["websites"].apply(extract_first_website)
             keep.append("website")
             
         if "addresses" in gdf.columns:
-            gdf["address"] = gdf["addresses"].apply(extract_formatted_address)
+            gdf.loc[:, "address"] = gdf["addresses"].apply(extract_formatted_address)
             keep.append("address")
         
         # Building-specific fields (using sanitized names)
@@ -123,25 +113,25 @@ def normalize_schema(
             keep.append("subtype")
     
     else:
-        # Default fallback - use sanitized field names
-        keep = [c for c in ["id", "feature_type", "subtype"] if c in gdf.columns]
+        # Default fallback - use original field names
+        keep = [c for c in ["id", "type", "subtype"] if c in gdf.columns]
     
     # Ensure geometry is included
     cols = keep + ["geometry"]
-    gdf = gdf[[c for c in cols if c in gdf.columns]]
+    gdf = gdf[[c for c in cols if c in gdf.columns]].copy()
 
     # Ensure id is string (for AGOL upsert)
     if "id" in gdf.columns:
-        gdf["id"] = gdf["id"].astype(str)
+        gdf.loc[:, "id"] = gdf["id"].astype(str)
     
     # Apply data type validation for numeric fields
     if "height" in gdf.columns:
         # Convert height to float, handle null values
-        gdf["height"] = gdf["height"].apply(lambda x: float(x) if x is not None and str(x).replace('.', '', 1).replace('-', '', 1).isdigit() else None)
+        gdf.loc[:, "height"] = gdf["height"].apply(lambda x: float(x) if x is not None and str(x).replace('.', '', 1).replace('-', '', 1).isdigit() else None)
     
     if "floor_count" in gdf.columns:
         # Convert floor_count to integer, handle null values
-        gdf["floor_count"] = gdf["floor_count"].apply(lambda x: int(float(x)) if x is not None and str(x).replace('.', '', 1).replace('-', '', 1).isdigit() else None)
+        gdf.loc[:, "floor_count"] = gdf["floor_count"].apply(lambda x: int(float(x)) if x is not None and str(x).replace('.', '', 1).replace('-', '', 1).isdigit() else None)
 
     return gdf
 

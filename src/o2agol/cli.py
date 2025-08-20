@@ -1285,7 +1285,7 @@ def overture_dump(
             type=target_config['type'],
             country=country_info.iso2,
             bbox=CountryRegistry.get_bounding_boxes().get(country_info.iso2) if not use_divisions else None,
-            filters=target_config.get('filters'),
+            filters=target_config.get('filter'),
             limit=limit
         )
         

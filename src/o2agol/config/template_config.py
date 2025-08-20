@@ -176,7 +176,7 @@ class TemplateConfigParser:
         release = self.overture.get('release', 'latest')
         release_year = release.split('-')[0] if '-' in release else str(now.year)
         
-        # Base variables available to all targets
+        # Base variables available to all targets 
         variables = {
             # Country/region
             'country_name': self.country.name,
@@ -190,9 +190,6 @@ class TemplateConfigParser:
             'contact_email': self.organization.contact_email,
             'license': self.organization.license,
             'update_frequency': self.organization.update_frequency,
-            
-            # AGOL Metadata templates
-            'attribution': self.templates.get('attribution', ''),
             
             # Overture data
             'release': release,
@@ -208,6 +205,13 @@ class TemplateConfigParser:
             'sector_tag': target_config.get('sector_tag', target_name),
             'data_type': target_config.get('data_type', 'Geospatial Data'),
         }
+        
+        # Now resolve attribution template using the variables we just created
+        attribution_template = self.templates.get('attribution', '')
+        if attribution_template:
+            variables['attribution'] = self._resolve_template_string(attribution_template, variables)
+        else:
+            variables['attribution'] = ''
         
         return variables
     

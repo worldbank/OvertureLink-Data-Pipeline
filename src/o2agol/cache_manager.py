@@ -50,7 +50,18 @@ def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame
                 column = parts[0].strip()
                 value = parts[1].strip().strip("'\"")
                 
-                if column in gdf.columns:
+                # Handle nested column access like 'categories.primary'
+                if "." in column:
+                    base_col, nested_key = column.split(".", 1)
+                    if base_col in gdf.columns:
+                        logger.debug(f"Applying nested filter: {column} = {value}")
+                        # Filter based on nested dictionary access
+                        mask = gdf[base_col].apply(lambda x: isinstance(x, dict) and x.get(nested_key) == value if x is not None else False)
+                        return gdf[mask]
+                    else:
+                        logger.warning(f"Base column '{base_col}' not found in data, returning empty result")
+                        return gdf.iloc[0:0]
+                elif column in gdf.columns:
                     return gdf[gdf[column] == value]
                 else:
                     logger.warning(f"Column '{column}' not found in data, returning empty result")
@@ -69,7 +80,18 @@ def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame
                     # Split by comma and clean up quotes
                     values = [v.strip().strip("'\"") for v in values_str.split(",")]
                     
-                    if column in gdf.columns:
+                    # Handle nested column access like 'categories.primary'
+                    if "." in column:
+                        base_col, nested_key = column.split(".", 1)
+                        if base_col in gdf.columns:
+                            logger.debug(f"Applying nested IN filter: {column} IN {values}")
+                            # Filter based on nested dictionary access
+                            mask = gdf[base_col].apply(lambda x: isinstance(x, dict) and x.get(nested_key) in values if x is not None else False)
+                            return gdf[mask]
+                        else:
+                            logger.warning(f"Base column '{base_col}' not found in data, returning empty result")
+                            return gdf.iloc[0:0]
+                    elif column in gdf.columns:
                         return gdf[gdf[column].isin(values)]
                     else:
                         logger.warning(f"Column '{column}' not found in data, returning empty result")

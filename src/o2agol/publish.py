@@ -876,8 +876,9 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
             }
             
             # Clean up any orphaned items before creating new service
-            logging.debug(f"Checking for orphaned GeoJSON items for service: {service_name}")
-            _cleanup_orphaned_geojson_items(gis, service_name)
+            logging.info(f"Checking for orphaned items and recycle bin conflicts for service: {service_name}")
+            logging.info("Note: If recycle bin conflicts exist, you may be prompted for permanent deletion confirmation")
+            _cleanup_orphaned_items(gis, service_name, title)
             
             # Use unified feature service creation with AGOL analyze
             try:
@@ -1242,8 +1243,9 @@ def publish_multi_layer_service(layer_data: LayerBundle, tgt, mode: str = "auto"
     }
     
     # Clean up any orphaned items before creating new service
-    logging.debug(f"Checking for orphaned GeoJSON items for multi-layer service: {service_name}")
-    _cleanup_orphaned_geojson_items(gis, service_name)
+    logging.info(f"Checking for orphaned items and recycle bin conflicts for multi-layer service: {service_name}")
+    logging.info("Note: If recycle bin conflicts exist, you may be prompted for permanent deletion confirmation")
+    _cleanup_orphaned_items(gis, service_name, title)
     
     # Use unified feature service creation with AGOL analyze
     try:
@@ -1886,27 +1888,106 @@ def _cleanup_geojson_item(item, max_retries: int = 3) -> bool:
     return False
 
 
-def _cleanup_orphaned_geojson_items(gis, service_name: str) -> int:
+def _confirm_permanent_delete(item, interactive_mode: bool = True, apply_to_all: bool = False) -> tuple[bool, bool]:
     """
-    Clean up orphaned GeoJSON items from previous failed attempts.
+    Ask user confirmation before permanently deleting an item from recycle bin.
+    
+    Args:
+        item: ArcGIS item to potentially delete
+        interactive_mode: Whether running interactively (can ask for input)
+        apply_to_all: Current state of apply_to_all flag
+        
+    Returns:
+        Tuple of (should_delete: bool, new_apply_to_all: bool)
+    """
+    import sys
+    
+    if not interactive_mode:
+        # In non-interactive mode (CI/CD), don't do permanent deletes
+        return False, apply_to_all
+    
+    if apply_to_all:
+        return True, apply_to_all
+    
+    # Show item details for informed decision
+    print(f"\n⚠️  PERMANENT DELETION REQUIRED")
+    print(f"Item in recycle bin is blocking service creation:")
+    print(f"  Title: {item.title}")
+    print(f"  Type: {item.type}")
+    print(f"  Owner: {getattr(item, 'owner', 'Unknown')}")
+    print(f"  Item ID: {item.itemid}")
+    print(f"\n❗ This item will be PERMANENTLY DELETED and cannot be recovered!")
+    print(f"This is required to create a new service with the same name.")
+    
+    while True:
+        try:
+            response = input("\nPermanently delete this item? [y/N/a(pply to all)]: ").lower().strip()
+            
+            if response in ['y', 'yes']:
+                return True, apply_to_all
+            elif response in ['n', 'no', '']:
+                print("Skipping permanent deletion. Service creation may fail due to name conflict.")
+                return False, apply_to_all
+            elif response in ['a', 'all', 'apply to all']:
+                print("Applying 'yes' to all remaining permanent delete confirmations.")
+                return True, True
+            else:
+                print("Please enter 'y' (yes), 'n' (no), or 'a' (apply to all)")
+                
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            return False, apply_to_all
+        except EOFError:
+            # Non-interactive environment detected
+            print("Non-interactive environment detected. Skipping permanent deletion.")
+            return False, apply_to_all
+
+
+def _cleanup_orphaned_items(gis, service_name: str, title: str = None) -> int:
+    """
+    Clean up orphaned items and recycle bin conflicts that prevent service creation.
+    
+    Handles both orphaned GeoJSON items from failed attempts and items in the recycle bin
+    that conflict with service names, preventing new service creation.
     
     Args:
         gis: Authenticated GIS connection
         service_name: Service name to search for related orphaned items
+        title: Service title to check for title conflicts (optional)
         
     Returns:
         Number of items cleaned up
     """
+    import sys
+    
     cleaned_count = 0
     
+    # Detect if running interactively (has stdin and can prompt user)
+    interactive_mode = hasattr(sys.stdin, 'isatty') and sys.stdin.isatty()
+    apply_to_all = False  # Track if user chose "apply to all"
+    
     try:
-        # Search for GeoJSON items that might be orphaned from this service
-        # Look for items with the service name or temporary naming patterns
+        # Search for ALL items that might be orphaned or causing recycle bin conflicts
+        # Remove type restrictions to catch CSV, Shapefile, Geodatabase, and other items
         search_patterns = [
-            f'title:*{service_name}* AND type:"GeoJson"',
+            # Service name conflicts - search ALL item types 
+            f'title:*{service_name}*',
+            f'name:*{service_name}*',
+            # Specific type searches for known patterns
             f'title:*temp* AND type:"GeoJson" AND tags:"overture-pipeline"',
-            f'title:*staging* AND type:"GeoJson" AND owner:{gis.users.me.username}'
+            f'title:*staging* AND type:"GeoJson" AND owner:{gis.users.me.username}',
+            # Service-specific patterns
+            f'title:*{service_name}* AND type:"Feature Service"',
+            f'title:*{service_name}* AND type:"GeoJson"'
         ]
+        
+        # Add title-based searches if title is provided - search ALL types
+        if title:
+            search_patterns.extend([
+                f'title:"{title}"',  # All items with exact title match
+                f'title:"{title}" AND type:"Feature Service"',
+                f'title:"{title}" AND type:"GeoJson"'
+            ])
         
         orphaned_items = []
         
@@ -1933,8 +2014,8 @@ def _cleanup_orphaned_geojson_items(gis, service_name: str) -> int:
                         if 'temporary' in [tag.lower() for tag in item_tags]:
                             is_orphaned = True
                     
-                    # Check 3: No related feature services
-                    if not is_orphaned:
+                    # Check 3: No related feature services (for GeoJSON items)
+                    if not is_orphaned and item.type == "GeoJson":
                         try:
                             related_services = item.related_items(relationship_type='Service2Data', direction='reverse')
                             if not related_services:
@@ -1945,6 +2026,20 @@ def _cleanup_orphaned_geojson_items(gis, service_name: str) -> int:
                         except Exception:
                             pass
                     
+                    # Check 4: Recycle bin conflicts (Feature Services that might be in recycle bin)
+                    if not is_orphaned and item.type == "Feature Service":
+                        try:
+                            # Try to access item properties to see if it's accessible
+                            _ = item.title
+                            _ = item.url
+                            # If we reach here, item is accessible - check if it matches our patterns
+                            if (service_name.lower() in item.title.lower() or 
+                                (title and title.lower() == item.title.lower())):
+                                is_orphaned = True
+                        except Exception:
+                            # Item might be in recycle bin or inaccessible - mark for cleanup
+                            is_orphaned = True
+                    
                     if is_orphaned and item not in orphaned_items:
                         orphaned_items.append(item)
                         
@@ -1953,12 +2048,72 @@ def _cleanup_orphaned_geojson_items(gis, service_name: str) -> int:
         
         # Clean up identified orphaned items
         for item in orphaned_items:
-            logging.info(f"Cleaning up orphaned GeoJSON item: {item.title} ({item.itemid})")
-            if _cleanup_geojson_item(item):
+            logging.info(f"Cleaning up orphaned {item.type} item: {item.title} ({item.itemid})")
+            
+            cleaned = False
+            if item.type == "GeoJson":
+                # Use existing GeoJSON cleanup method (regular delete only)
+                cleaned = _cleanup_geojson_item(item)
+            else:
+                # For all other item types, try regular delete first
+                try:
+                    # First try regular delete
+                    result = item.delete()
+                    if result:
+                        cleaned = True
+                        logging.info(f"Regular delete successful for {item.title}")
+                    else:
+                        # Regular delete failed - item likely in recycle bin, needs permanent delete
+                        should_delete, apply_to_all = _confirm_permanent_delete(
+                            item, interactive_mode, apply_to_all
+                        )
+                        
+                        if should_delete:
+                            result = item.delete(permanent=True)
+                            if result:
+                                cleaned = True
+                                logging.info(f"✓ Permanently deleted recycle bin item: {item.title}")
+                            else:
+                                logging.warning(f"Failed to permanently delete {item.title}")
+                        else:
+                            logging.info(f"Skipped permanent deletion of {item.title} (user declined)")
+                            
+                except Exception as e:
+                    # Exception during regular delete - try permanent delete with confirmation
+                    error_msg = str(e).lower()
+                    if 'does not exist' in error_msg or 'not found' in error_msg:
+                        logging.debug(f"Item {item.title} already deleted")
+                        cleaned = True
+                    else:
+                        logging.debug(f"Regular delete failed for {item.title}: {e}")
+                        
+                        should_delete, apply_to_all = _confirm_permanent_delete(
+                            item, interactive_mode, apply_to_all
+                        )
+                        
+                        if should_delete:
+                            try:
+                                result = item.delete(permanent=True)
+                                if result:
+                                    cleaned = True
+                                    logging.info(f"✓ Permanently deleted conflicting item: {item.title}")
+                                else:
+                                    logging.warning(f"Failed to permanently delete {item.title}")
+                            except Exception as perm_error:
+                                logging.warning(f"Could not permanently delete {item.title}: {perm_error}")
+                        else:
+                            logging.info(f"Skipped permanent deletion of {item.title} (user declined)")
+            
+            if cleaned:
                 cleaned_count += 1
             
         if cleaned_count > 0:
-            logging.info(f"Cleaned up {cleaned_count} orphaned GeoJSON items")
+            logging.info(f"✓ Cleaned up {cleaned_count} orphaned/conflicting items")
+            if not interactive_mode:
+                logging.info("Note: Running in non-interactive mode - permanent deletions were skipped")
+        elif orphaned_items:
+            logging.info(f"Found {len(orphaned_items)} potential conflicts but none were cleaned up")
+            logging.info("This may cause service creation failures due to name conflicts")
         
     except Exception as e:
         logging.warning(f"Error during orphaned item cleanup: {e}")
