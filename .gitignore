@@ -38,8 +38,10 @@ logs/
 *.gpkg
 *.txt
 .ruff_cache/
+overturedump/
 
 # Development, debugging and experimental features
 dev/
 tests/
 src/o2agol/debug.py
+

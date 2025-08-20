@@ -5,6 +5,52 @@ from typing import Literal
 import geopandas as gpd
 
 
+def sanitize_field_names(gdf: gpd.GeoDataFrame, layer_type: str = "generic") -> gpd.GeoDataFrame:
+    """
+    Sanitize field names for AGOL compatibility by handling SQL reserved keywords
+    and length limits while preserving Overture semantic field names.
+    """
+    # Only handle truly problematic SQL reserved keywords
+    RESERVED_KEYWORDS = {
+        'class': 'feature_class',  # SQL reserved word
+        'type': 'feature_type',    # SQL reserved word
+        'order': 'sort_order',     # SQL reserved word
+        'group': 'data_group'      # SQL reserved word
+    }
+    
+    # Preserve Overture field names - they have semantic meaning
+    # Only rename fields that cause technical issues, not semantic ones
+    
+    # Create mapping of old to new names
+    rename_mapping = {}
+    
+    for col in gdf.columns:
+        if col == 'geometry':  # Skip geometry column
+            continue
+            
+        new_name = col
+        
+        # Handle reserved keywords only
+        if col.lower() in RESERVED_KEYWORDS:
+            new_name = RESERVED_KEYWORDS[col.lower()]
+        
+        # Ensure field name length is under 31 characters (AGOL limit)
+        if len(new_name) > 30:
+            new_name = new_name[:30]
+            
+        # Clean up any remaining issues
+        new_name = new_name.replace(' ', '_').replace('-', '_')
+        
+        if new_name != col:
+            rename_mapping[col] = new_name
+    
+    # Apply the renaming
+    if rename_mapping:
+        gdf = gdf.rename(columns=rename_mapping)
+    
+    return gdf
+
+
 def normalize_schema(
     gdf: gpd.GeoDataFrame, layer: Literal["roads", "buildings", "education", "health", "markets", "places"]
 ) -> gpd.GeoDataFrame:
