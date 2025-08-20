@@ -261,7 +261,7 @@ class CountryCacheManager:
             release=query.release,
             use_divisions=query.use_divisions,
             limit=None,  # Never apply limits when caching
-            filters=query.filters
+            filters=None  # Never apply filters when caching - cache complete data
         )
         gdf = self._extract_country_data(extraction_query, config_obj)
         

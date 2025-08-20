@@ -384,6 +384,7 @@ def _create_feature_service(
     
     # Create temporary GeoJSON
     tmp = _gdf_to_geojson_tempfile(gdf)
+    item = None  # Track GeoJSON item for cleanup
     
     try:
         logging.info(f"Creating AGOL item with {len(item_properties)} metadata fields")
@@ -546,6 +547,17 @@ def _create_feature_service(
             
             raise RuntimeError(f"Failed to publish service: {publish_error}")
             
+    except (KeyboardInterrupt, SystemExit):
+        # Handle interruptions (Ctrl+C, process kill) - cleanup GeoJSON item
+        if item:
+            logging.info(f"Process interrupted - cleaning up GeoJSON item: {item.itemid}")
+            cleanup_success = _cleanup_geojson_item(item)
+            if cleanup_success:
+                logging.info(f"Successfully cleaned up interrupted GeoJSON item: {item.itemid}")
+            else:
+                logging.warning(f"Failed to cleanup interrupted GeoJSON item: {item.itemid}")
+        raise
+        
     finally:
         # Always cleanup temp file
         try:
@@ -850,13 +862,18 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
             
             # STANDARD PATH: Check dataset size and route to appropriate strategy
             dataset_size = _analyze_dataset_size(gdf)
-            
-            if dataset_size.is_large_dataset:
-                logging.info(f"Large dataset detected: {len(gdf):,} features, estimated {dataset_size.file_size_mb:.1f}MB")
+            seed_threshold = int(os.environ.get('INITIAL_SEED_THRESHOLD', '150000'))
+
+            if dataset_size.is_large_dataset or len(gdf) > seed_threshold:
+                logging.info(
+                    f"Large dataset detected: {len(gdf):,} features, "
+                    f"estimated {dataset_size.file_size_mb:.1f}MB"
+                )
                 logging.info("Using seed-and-append strategy to avoid analyze timeouts")
-                
+
                 # Use seed-and-append strategy for large datasets
                 return _initial_with_seed_and_append(gis, gdf, tgt, dataset_size)
+
             
             # Standard publishing path for smaller datasets
             logging.info(f"Preparing {len(gdf):,} features for AGOL publishing")
