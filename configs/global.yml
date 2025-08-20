@@ -25,7 +25,7 @@ organization:
 templates:
   title: "{country_name} {sector_title}"
   snippet: "{country_name} {sector_description} with open data from Overture Maps Foundations."
-  service_name: "{iso3}_{sector_tag}"
+  service_name: "{iso2}_{sector_tag}"
   description: "
     {sector_title} data for {country_name} from Overture Maps {release} release.<br><br>
     <b>Data Type:</b> {data_type}<br>
