@@ -25,7 +25,7 @@ organization:
 templates:
   title: "{country_name} {sector_title}"
   snippet: "{country_name} {sector_description} with open data from Overture Maps Foundations."
-  service_name: "{iso3}_{sector_tag}"
+  service_name: "{iso2}_{sector_tag}"
   description: "
     {sector_title} data for {country_name} from Overture Maps {release} release.<br><br>
     <b>Data Type:</b> {data_type}<br>
@@ -195,7 +195,7 @@ targets:
     # No filter - all places
     
     # Sector-specific Variables
-    sector_title: "All Places"
+    sector_title: "Points of Interest"
     sector_description: "comprehensive points of interest and places"
     sector_tag: "places"
     data_type: "Points of Interest"
@@ -206,7 +206,7 @@ targets:
       snippet: "{snippet}"
       description: "{description}"
       service_name: "{service_name}"
-      tags: "{tags_base} + ['places', 'poi', 'locations', 'amenities']"
+      tags: "{tags_base} + ['places', 'poi']"
       access_information: "{access_information}"
       license_info: "{license_info}"
       upsert_key: "id"

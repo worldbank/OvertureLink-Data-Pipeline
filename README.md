@@ -1,16 +1,21 @@
 # Overture Maps Data to GeoJSON and ArcGIS Online Pipeline
 
 ## Purpose
-Choose your Overture query, specific the country, then you're done! This code allows you to automatically query Overture data to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use.
+Choose your Overture query, specify the country, then you're done!
 
-This is a cloud-native ETL pipeline to extract Overture Maps data (such as roads, buildings), transform to an AGOL-ready schema, and then allows you to choose to export to .geojson or publish as a feature layer in ArcGIS Online. This pipeline supports 176 countries worldwide, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases.
+This cloud-native ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases.
+
+### Three commands
+- `agol-upload` - Upload your query to ArcGIS Online
+- `geojson-download` - Download your query in .geojson format
+- `overture-dump` - Caches your query (by country / theme) for continued use without need for multiple downloads.
 
 ## Pipeline Overview
 - Configuration (`configs\global.yml`): Easily change metadata, choose the Overture release, or add your own queries.
-- Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3 with spatial queries and for fast data access.
+- Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3 with spatial queries and for data access.
 - Transform (`transform.py`): Normalize schema/geometry, retain stable Overture/GERS IDs, define/delete/add metadata fields. Turns into an easy to use .geojson for exporting if you wish.
 - Publish (`publish.py`): ArcGIS Python API with detection, automatically creates new layers or updates existing ones with data and metadata.
-- Data dump (`dump-manager.py`): Only for local data dumps. Checks to see if there is data by theme for Overture and downloads if needed.
+- Data dump (`dump-manager.py`): Only for local country caching if you want to use it. Checks to see if there is data by country and theme for Overture and downloads if needed.
 
 ## Requirements
 - Python 3.11+ (version must be compatiable with arcgis package)
@@ -91,7 +96,7 @@ Use `configs/global.yml` with the `--country` parameter:
 - `mode`: initial/overwrite/append
 
 ### Clip modes
-- Overture Division Clip: precise geometric clip with bbox pre-filtering for optimal performance. Use `--use-divisions` for production (default).
+- Overture Division Clip: precise geometric clip with bbox pre-filtering. Use `--use-divisions` for production (default).
 - Box: bbox-only overlap for fastest processing. Use `--use-bbox` for development and testing.
 
 ## Outputs
@@ -113,27 +118,11 @@ To build your command, you need three elemenets:
 - The query you are using
 - The country you are querying
 
-### Commands Available
-
-#### ArcGIS Online Upload
-- `arcgis-upload` - Process and upload data to ArcGIS Online
-- Supports `--dry-run` for validation without publishing
-- Supports all processing modes: auto, initial, overwrite, append
-
-#### GeoJSON Export  
-- `geojson-download` - Process and export data as GeoJSON file
-- Auto-generates filename if not specified: {iso3}_{query}.geojson
-
-#### Local Dump Processing 
-- `overture-dump` - Download Overture themes once, process many times
-- `list-dumps` - Show available local dumps with metadata
-- `validate-dump` - Verify dump integrity and completeness
-
 ### Choosing a Query
-There are sets of queries prebuilt that you can find in the configs file but you can create your own. 
+There are sets of queries prebuilt that you can find below and in the configs file, but you can create your own. 
 
 #### Lines
-- `roads` - Transportation networks (all roads, not filtered). `theme: transportation`
+- `roads` - Transportation networks (all roads, not filtered).
 
 #### Points & Polygons (Multi-layer)
 - `education` - Education facilities. Creates multi-layer service with both geometry types.
@@ -158,10 +147,7 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - `--verbose` / `-v` - Enable detailed debug logging output  
 - `--log-to-file` - Create timestamped log files in "/logs" directory
 - `--dry-run` - Processes but doesn't publish to AGOL, good for testing without uploading every test
-
-### Choosing config file
-- `-c configs/global.yml --country <code>` (Default) - Global config with dynamic country selection 
-- `-c configs/afg.yml` - Legacy country-specific config file
+- `-c configs/global.yml` - Choose another config (global.yml is default) 
 
 ### Modes
 - `--mode auto` (default) - Smart detection: automatically creates new layers or updates existing ones based on service name
@@ -188,10 +174,9 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 ### Troubleshooting
 
 #### Common Issues
-- **Download fails**: Check internet connection and S3 access
-- **Validation errors**: Re-download with `--force-download`
-- **Memory errors**: Reduce `DUMP_MAX_MEMORY` or use `--limit`
-- **Disk space**: Use `o2agol list-dumps` to check space usage
+- Validation errors: Re-download with `--force-download`
+- Memory errors: Reduce `DUMP_MAX_MEMORY` or use `--limit`
+- Disk space: Use `o2agol list-dumps` to check space usage
 
 #### Performance Tips  
 - Use `--use-bbox` for development (faster spatial filtering)

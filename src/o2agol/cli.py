@@ -1004,6 +1004,7 @@ def overture_dump(
     query: Annotated[str, typer.Argument(help="Query type to execute. Use 'list-queries' command to see available options.")],
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
     country: Annotated[Optional[str], typer.Option("--country", help="Country code/name (e.g., 'af', 'afg', 'Afghanistan')")] = None,
+    mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     download_only: Annotated[bool, typer.Option("--download-only", help="Only download dump without processing")] = False,
     use_local: Annotated[bool, typer.Option("--use-local/--use-s3", help="Use local dump if available")] = True,
     force_download: Annotated[bool, typer.Option("--force-download", help="Force re-download even if dump exists")] = False,
@@ -1015,29 +1016,36 @@ def overture_dump(
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without processing/publishing")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
+    # Cache optimization flags
+    use_world_bank: Annotated[bool, typer.Option("--world-bank/--overture-divisions", help="Use World Bank boundaries (default: enabled)")] = True,
 ):
     """
-    Process Overture data using local dumps for improved performance.
+    Process Overture data using efficient country-specific caching.
     
-    This command downloads complete Overture themes once and reuses them for multiple 
-    countries/queries, providing 10-100x performance improvement for batch operations.
+    This command caches data at the country level rather than downloading complete 
+    themes, providing the same performance benefits while avoiding memory issues 
+    and aligning with Overture Maps best practices.
     
-    The dump system downloads by Overture's six themes (addresses, base, buildings, 
-    divisions, places, transportation) and stores them locally in ./overturedump/.
+    The cache system stores country-specific extracts in ./cache/ using proven 
+    DuckDB streaming extraction from Overture's S3 buckets.
     
     Examples:
-        Download dump for theme (one-time operation):
-            o2agol overture-dump roads --country afg --download-only
-            
-        Process from local dump (fast, repeatable):
+        Cache and process data for a country:
             o2agol overture-dump roads --country afg
-            o2agol overture-dump roads --country pak  # Uses same dump
+            o2agol overture-dump roads --country pak  # Each country cached separately
             
-        Force fresh download:
+        Specify publishing mode (similar to arcgis-upload):
+            o2agol overture-dump buildings --country afg --mode overwrite
+            o2agol overture-dump places --country pak --mode initial
+            
+        Force refresh cache:
             o2agol overture-dump buildings --country afg --force-download
             
         Export to GeoJSON instead of AGOL:
             o2agol overture-dump places --country afg --format geojson
+            
+        Cache only without processing:
+            o2agol overture-dump roads --country afg --download-only
     """
     # Validate query exists
     if not validate_query_exists(config, query):
@@ -1047,6 +1055,12 @@ def overture_dump(
             typer.echo(f"\nAvailable queries: {', '.join(sorted(available_queries))}", err=True)
         except (FileNotFoundError, ValueError) as e:
             typer.echo(f"ERROR loading configuration: {e}", err=True)
+        raise typer.Exit(1)
+    
+    # Validate mode parameter
+    valid_modes = ["auto", "initial", "overwrite", "append"]
+    if mode not in valid_modes:
+        typer.echo(f"ERROR: --mode must be one of: {', '.join(valid_modes)}", err=True)
         raise typer.Exit(1)
     
     # Validate output format
@@ -1068,8 +1082,45 @@ def overture_dump(
         raise typer.Exit(1)
     
     # Setup logging
-    mode = "dump"
-    setup_logging(verbose, query, mode, log_to_file)
+    log_mode = "dump"
+    setup_logging(verbose, query, log_mode, log_to_file)
+    
+    # Initialize comprehensive timing
+    import time
+    from datetime import datetime, timedelta
+    
+    def format_duration(seconds: float) -> str:
+        """Format duration in human-readable format."""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        else:
+            minutes = int(seconds // 60)
+            secs = seconds % 60
+            return f"{minutes}m {secs:.1f}s"
+    
+    def log_phase_start(phase_name: str) -> float:
+        """Log phase start and return start time."""
+        logging.info("=" * 60)
+        logging.info(f"PHASE: {phase_name}")
+        logging.info("=" * 60)
+        return time.time()
+    
+    def log_phase_end(phase_name: str, start_time: float) -> float:
+        """Log phase completion and return duration."""
+        duration = time.time() - start_time
+        logging.info(f"{phase_name} completed in {format_duration(duration)}")
+        return duration
+    
+    # Start overall timing
+    operation_start_time = time.time()
+    logging.info(f"Starting overture-dump operation: {query} for {country}")
+    logging.info(f"Execution timestamp: {datetime.now()}")
+    
+    # Phase timings
+    phase_times = {}
+    
+    # === PHASE 1: CONFIGURATION & SETUP ===
+    phase1_start = log_phase_start("CONFIGURATION & SETUP")
     
     # Load configuration to get theme information
     cfg = load_pipeline_config(config, country)
@@ -1083,76 +1134,118 @@ def overture_dump(
         themes_to_download.append('buildings')
         logging.info(f"Dual-theme query detected: {query} requires themes {themes_to_download}")
     
-    logging.info(f"Processing dump-based query: {query} (themes: {themes_to_download})")
+    logging.info(f"Processing cache-based query: {query} (themes: {themes_to_download})")
     logging.info(f"Release: {release}")
     logging.info(f"Country: {country}")
     logging.info(f"Output format: {output_format}")
     
-    # Initialize dump manager with configuration
-    dump_manager = DumpManager(config=cfg.secure_config.dump)
-    logging.info(f"Dump storage location: {dump_manager.base_path}")
+    # Create cache configuration from CLI parameters
+    from .dump_manager import DumpConfig
+    
+    # Create DumpConfig with cache optimization settings
+    dump_config = DumpConfig()
+    
+    # Preserve any existing base_path from old config if available
+    if hasattr(cfg['secure'], 'dump') and hasattr(cfg['secure'].dump, 'base_path'):
+        dump_config.base_path = cfg['secure'].dump.base_path
+    
+    # Apply CLI optimization parameters
+    dump_config.use_world_bank_boundaries = use_world_bank
+    dump_config.enable_boundary_cache = use_world_bank  # Enable cache if using World Bank boundaries
+    
+    # Initialize dump manager with cache system
+    dump_manager = DumpManager(config=dump_config)
+    
+    # End Phase 1
+    phase_times['configuration'] = log_phase_end("CONFIGURATION & SETUP", phase1_start)
+    logging.info(f"Cache storage location: {dump_manager.base_path}/country_cache")
+    logging.info(f"Using country-specific caching approach")
+    logging.info(f"Boundary optimization: world_bank={use_world_bank}")
     
     if dry_run:
-        logging.info("Dry run mode - validating configuration and dump access...")
-        # In dry run, check if dumps exist but don't download
-        missing_themes = []
-        for theme_to_download in themes_to_download:
-            if not dump_manager.check_dump_exists(release, theme_to_download):
-                missing_themes.append(theme_to_download)
-            else:
-                logging.info(f"Found existing {theme_to_download} dump")
+        logging.info("Dry run mode - validating configuration...")
         
-        if missing_themes:
-            logging.info(f"Missing themes for dry run: {missing_themes}")
-            logging.info("Would download these themes in non-dry-run mode")
-            logging.info("Dry run complete - configuration valid but dumps need downloading.")
-            return
-        
-        # Test query with existing dumps
+        # Validate country and configuration
         try:
-            from .dump_manager import DumpQuery
             from .config.countries import CountryRegistry
             
             country_info = CountryRegistry.get_country(country)
             if not country_info:
                 raise ValueError(f"Unknown country: {country}")
             
-            test_query = DumpQuery(
-                theme=theme,
-                type=target_config['type'],
-                country=country_info.iso2,
-                limit=1
-            )
+            # Check cache status for each theme
+            cached_themes = []
+            missing_themes = []
             
-            result = dump_manager.query_local_dump(test_query, release)
-            logging.info(f"Dump validation successful. Would process {len(result)} features (test with limit=1)")
-            logging.info("Dry run complete.")
+            for theme_to_check in themes_to_download:
+                type_name = target_config['type'] if theme_to_check == theme else 'building'
+                
+                # Check if cache exists for this country/theme combination
+                cache_entries = dump_manager.list_cached_data(release)
+                theme_cached = any(
+                    entry.country == country_info.iso2 and 
+                    entry.theme == theme_to_check and 
+                    entry.type_name == type_name
+                    for entry in cache_entries
+                )
+                
+                if theme_cached:
+                    if force_download:
+                        logging.info(f"Found cached {theme_to_check} data for {country_info.name} - would be refreshed")
+                        missing_themes.append(theme_to_check)
+                    else:
+                        logging.info(f"Found cached {theme_to_check} data for {country_info.name}")
+                        cached_themes.append(theme_to_check)
+                else:
+                    logging.info(f"No cached {theme_to_check} data for {country_info.name}")
+                    missing_themes.append(theme_to_check)
+            
+            if missing_themes:
+                if force_download:
+                    logging.info(f"Themes to be refreshed: {missing_themes}")
+                else:
+                    logging.info(f"Themes to be cached: {missing_themes}")
+                logging.info("Would extract and cache this data in non-dry-run mode")
+            
+            logging.info("Dry run complete - configuration validated.")
             return
             
         except Exception as e:
-            logging.error(f"Dump validation failed: {e}")
+            logging.error(f"Configuration validation failed: {e}")
             raise typer.Exit(1)
     
-    # Check/download all required themes (non-dry-run only)
-    for theme_to_download in themes_to_download:
-        if force_download or not dump_manager.check_dump_exists(release, theme_to_download):
-            if not force_download:
-                logging.info(f"Dump not found for {theme_to_download}, downloading...")
-            else:
-                logging.info(f"Force downloading {theme_to_download} dump...")
-            
-            try:
-                dump_manager.download_theme(release, theme_to_download)
-                logging.info(f"Successfully downloaded {theme_to_download} dump")
-            except Exception as e:
-                logging.error(f"Failed to download {theme_to_download} dump: {e}")
-                raise typer.Exit(1)
-        else:
-            logging.info(f"Using existing {theme_to_download} dump")
-    
+    # Handle download_only mode by caching data for the country
     if download_only:
-        logging.info("Download complete. Exiting.")
-        return
+        logging.info("Cache-only mode - extracting and caching data without processing...")
+        
+        try:
+            from .config.countries import CountryRegistry
+            
+            country_info = CountryRegistry.get_country(country)
+            if not country_info:
+                raise ValueError(f"Unknown country: {country}")
+            
+            # Cache data for each required theme
+            for theme_to_cache in themes_to_download:
+                type_name = target_config['type'] if theme_to_cache == theme else 'building'
+                
+                logging.info(f"Caching {theme_to_cache} data for {country_info.name}...")
+                dump_manager.cache_country_data(
+                    country=country_info.iso2,
+                    theme=theme_to_cache,
+                    type_name=type_name,
+                    config_obj=cfg,
+                    release=release,
+                    overwrite=force_download
+                )
+                logging.info(f"Successfully cached {theme_to_cache} data for {country_info.name}")
+            
+            logging.info("Cache complete. Exiting.")
+            return
+            
+        except Exception as e:
+            logging.error(f"Failed to cache data: {e}")
+            raise typer.Exit(1)
     
     # Process query using local dump
     try:
@@ -1174,9 +1267,24 @@ def overture_dump(
             limit=limit
         )
         
-        # Query local dump
-        logging.info("Querying local dump...")
-        query_result = dump_manager.query_local_dump(query_obj, release)
+        # === PHASE 2: DATA ACQUISITION ===
+        phase2_start = log_phase_start("DATA ACQUISITION")
+        
+        # Handle dual-theme queries directly
+        if building_filter:
+            logging.info(f"Processing dual-theme query: places + buildings")
+            query_result = dump_manager.query_dual_theme(
+                query_obj, 
+                building_filter, 
+                release, 
+                cfg, 
+                force_download=force_download
+            )
+        else:
+            query_result = dump_manager.query_local_dump(query_obj, release, cfg, force_download=force_download)
+        
+        # End Phase 2
+        phase_times['data_acquisition'] = log_phase_end("DATA ACQUISITION", phase2_start)
         
         # Handle both single GeoDataFrame and dual-query dict results
         if isinstance(query_result, dict):
@@ -1190,16 +1298,28 @@ def overture_dump(
             
             logging.info(f"Found {total_features} total features across layers")
             
+            # === PHASE 3: DATA TRANSFORMATION ===
+            phase3_start = log_phase_start("DATA TRANSFORMATION")
+            
             # Transform each layer
             transformed_data = {}
             for layer_name, layer_gdf in query_result.items():
                 if not layer_gdf.empty:
+                    layer_transform_start = time.time()
                     logging.info(f"Transforming {len(layer_gdf)} {layer_name} features...")
                     transformed_data[layer_name] = normalize_schema(layer_gdf, query)
+                    layer_transform_time = time.time() - layer_transform_start
+                    logging.info(f"Transformed {layer_name} in {format_duration(layer_transform_time)}")
             
             if not transformed_data:
                 logging.warning("No valid data after transformation")
                 return
+            
+            # End Phase 3
+            phase_times['transformation'] = log_phase_end("DATA TRANSFORMATION", phase3_start)
+            
+            # === PHASE 4: OUTPUT ===
+            phase4_start = log_phase_start("OUTPUT")
             
             # Output based on format
             if output_format == "geojson":
@@ -1213,20 +1333,52 @@ def overture_dump(
                 
             else:  # agol format
                 logging.info("Publishing multi-layer service to ArcGIS Online...")
-                result_dict = publish_or_update(
-                    data=transformed_data,
-                    pipeline_config=cfg,
-                    target_name=query,
-                    mode="auto"
-                )
                 
-                if result_dict.get('success'):
+                # Create target configuration adapter (similar to single-theme approach)
+                target_config = cfg.get('targets', {}).get(query, {})
+                if cfg.get('config_format') == 'template':
+                    # Use template metadata with dynamic variables
+                    template_metadata = cfg['template'].get_target_metadata(query)
+                    
+                    # Create AGOL config with essential metadata
+                    agol_config_dict = {
+                        'item_title': template_metadata.item_title,
+                        'snippet': template_metadata.snippet,
+                        'description': template_metadata.description,
+                        'service_name': template_metadata.service_name,
+                        'tags': template_metadata.tags,
+                        'access_information': template_metadata.access_information,
+                        'license_info': template_metadata.license_info,
+                        'upsert_key': template_metadata.upsert_key,
+                        'item_id': template_metadata.item_id
+                    }
+                    
+                    target_adapter = type('TargetConfig', (), {
+                        'agol': type('AGOLConfig', (), agol_config_dict)()
+                    })()
+                    
+                    logging.info(f"Using template metadata: {template_metadata.item_title}")
+                else:
+                    # Legacy config adapter
+                    target_adapter = type('TargetConfig', (), {
+                        'agol': type('AGOLConfig', (), target_config.get('agol', {}))()
+                    })()
+                
+                # Use multi-layer publishing service (same as arcgis-upload command)
+                from .publish import publish_multi_layer_service
+                result = publish_multi_layer_service(transformed_data, target_adapter, mode)
+                
+                # publish_multi_layer_service returns the published item, not a dict
+                if result:
                     logging.info("Successfully published multi-layer service to ArcGIS Online")
-                    if result_dict.get('item_url'):
-                        logging.info(f"Item URL: {result_dict['item_url']}")
+                    logging.info(f"Item URL: {result.homepage}")
+                    logging.info(f"Item ID: {result.itemid}")
                 else:
                     logging.error("Failed to publish multi-layer service to ArcGIS Online")
                     raise typer.Exit(1)
+            
+            # End Phase 4 for dual-theme
+            phase_times['output'] = log_phase_end("OUTPUT", phase4_start)
         
         else:
             # Single GeoDataFrame result
@@ -1236,9 +1388,21 @@ def overture_dump(
                 logging.warning("No data found for query")
                 return
             
+            # === PHASE 3: DATA TRANSFORMATION ===
+            phase3_start = log_phase_start("DATA TRANSFORMATION")
+            
             # Transform data
+            transform_start = time.time()
             logging.info(f"Transforming {len(gdf)} features...")
             gdf_transformed = normalize_schema(gdf, query)
+            transform_time = time.time() - transform_start
+            logging.info(f"Transformation completed in {format_duration(transform_time)}")
+            
+            # End Phase 3
+            phase_times['transformation'] = log_phase_end("DATA TRANSFORMATION", phase3_start)
+            
+            # === PHASE 4: OUTPUT ===
+            phase4_start = log_phase_start("OUTPUT")
             
             # Output based on format
             if output_format == "geojson":
@@ -1251,23 +1415,83 @@ def overture_dump(
                 
             else:  # agol format
                 logging.info("Publishing to ArcGIS Online...")
-                result_dict = publish_or_update(
-                    data=gdf_transformed,
-                    pipeline_config=cfg,
-                    target_name=query,
-                    mode="auto"
-                )
                 
-                if result_dict.get('success'):
+                # Create target configuration adapter (similar to arcgis-upload command)
+                target_config = cfg.get('targets', {}).get(query, {})
+                if cfg.get('config_format') == 'template':
+                    # Use template metadata with dynamic variables
+                    template_metadata = cfg['template'].get_target_metadata(query)
+                    
+                    # Create AGOL config with essential metadata
+                    agol_config_dict = {
+                        'item_title': template_metadata.item_title,
+                        'snippet': template_metadata.snippet,
+                        'description': template_metadata.description,
+                        'service_name': template_metadata.service_name,
+                        'tags': template_metadata.tags,
+                        'access_information': template_metadata.access_information,
+                        'license_info': template_metadata.license_info,
+                        'upsert_key': template_metadata.upsert_key,
+                        'item_id': template_metadata.item_id
+                    }
+                    
+                    target_adapter = type('TargetConfig', (), {
+                        'agol': type('AGOLConfig', (), agol_config_dict)()
+                    })()
+                    
+                    logging.info(f"Using template metadata: {template_metadata.item_title}")
+                else:
+                    # Legacy config adapter
+                    target_adapter = type('TargetConfig', (), {
+                        'agol': type('AGOLConfig', (), target_config.get('agol', {}))()
+                    })()
+                
+                result = publish_or_update(gdf_transformed, target_adapter, mode)
+                
+                # publish_or_update returns the published item, not a dict
+                if result:
                     logging.info("Successfully published to ArcGIS Online")
-                    if result_dict.get('item_url'):
-                        logging.info(f"Item URL: {result_dict['item_url']}")
+                    logging.info(f"Item URL: {result.homepage}")
+                    logging.info(f"Item ID: {result.itemid}")
                 else:
                     logging.error("Failed to publish to ArcGIS Online")
                     raise typer.Exit(1)
+            
+            # End Phase 4 for single-theme
+            phase_times['output'] = log_phase_end("OUTPUT", phase4_start)
+        
+        # === OPERATION SUMMARY ===
+        total_duration = time.time() - operation_start_time
+        logging.info("=" * 60)
+        logging.info("OPERATION COMPLETE")
+        logging.info("=" * 60)
+        logging.info(f"Total execution time: {format_duration(total_duration)}")
+        logging.info("Performance breakdown:")
+        
+        # Calculate percentage for each phase
+        for phase_name, phase_duration in phase_times.items():
+            percentage = (phase_duration / total_duration) * 100 if total_duration > 0 else 0
+            logging.info(f"  {phase_name.replace('_', ' ').title()}: {format_duration(phase_duration)} ({percentage:.1f}%)")
+        
+        # Add performance context
+        if total_duration < 60:
+            logging.info("Operation completed in less than one minute")
+        elif total_duration < 300:
+            logging.info("Standard operation completed successfully in less than 5 minutes")  
+        else:
+            logging.info("Extended operation completed (large dataset)")
     
     except Exception as e:
-        logging.error(f"Processing failed: {e}")
+        # Calculate timing even for errors
+        error_duration = time.time() - operation_start_time
+        logging.error("=" * 60)
+        logging.error("OPERATION FAILED")
+        logging.error("=" * 60)
+        logging.error(f"Processing failed after {format_duration(error_duration)}: {e}")
+        if phase_times:
+            logging.error("Completed phases:")
+            for phase_name, phase_duration in phase_times.items():
+                logging.error(f"  {phase_name.replace('_', ' ').title()}: {format_duration(phase_duration)}")
         raise typer.Exit(1)
     
     finally:
@@ -1282,17 +1506,17 @@ def list_dumps():
     Shows information about downloaded dumps including release version,
     themes, download date, size, and validation status.
     """
-    # Initialize dump manager with environment-based configuration
-    from .config.settings import Config
-    temp_config = Config()  # This will load environment variables
-    dump_manager = DumpManager(config=temp_config.dump)
+    # Initialize dump manager with default configuration
+    from .dump_manager import DumpConfig
+    dump_config = DumpConfig()
+    dump_manager = DumpManager(config=dump_config)
     
     try:
         dumps = dump_manager.get_available_dumps()
         
         if not dumps:
             typer.echo("No local dumps found.")
-            typer.echo("Use 'o2agol overture-dump <query> --download-only' to download dumps.")
+            typer.echo("Use 'o2agol overture-dump <query> --download-only' to cache data.")
             return
         
         typer.echo("Available Local Overture Dumps")
@@ -1335,10 +1559,10 @@ def validate_dump(
     """
     setup_logging(verbose)
     
-    # Initialize dump manager with environment-based configuration
-    from .config.settings import Config
-    temp_config = Config()  # This will load environment variables
-    dump_manager = DumpManager(config=temp_config.dump)
+    # Initialize dump manager with default configuration
+    from .dump_manager import DumpConfig
+    dump_config = DumpConfig()
+    dump_manager = DumpManager(config=dump_config)
     
     try:
         logging.info(f"Validating dump: {release}/{theme}")
@@ -1365,6 +1589,149 @@ def validate_dump(
     
     finally:
         dump_manager.close()
+
+
+@app.command("list-cache")
+def list_cache(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
+    release: Annotated[str, typer.Option("--release", help="Overture release version")] = "latest",
+):
+    """
+    List cached country data entries.
+    
+    Shows all cached data with metadata including country, theme, feature counts, and file sizes.
+    """
+    try:
+        # Load minimal config to get dump manager
+        from .dump_manager import DumpManager, DumpConfig
+        import os
+        
+        dump_config = DumpConfig()
+        dump_config.base_path = os.path.abspath('./overturedump')
+        dump_manager = DumpManager(config=dump_config)
+        
+        # Get cache entries
+        cache_entries = dump_manager.list_cached_data(release)
+        
+        if not cache_entries:
+            typer.echo(f"No cached data found for release: {release}")
+            return
+        
+        # Group by country for better display
+        countries = {}
+        for entry in cache_entries:
+            if entry.country not in countries:
+                countries[entry.country] = []
+            countries[entry.country].append(entry)
+        
+        typer.echo(f"Cached data for release: {release}")
+        typer.echo("=" * 60)
+        
+        total_size_mb = 0
+        total_features = 0
+        
+        for country_code, entries in sorted(countries.items()):
+            typer.echo(f"\nCountry: {country_code}")
+            for entry in entries:
+                size_str = f"{entry.size_mb:.1f} MB"
+                features_str = f"{entry.feature_count:,} features"
+                typer.echo(f"  {entry.theme}/{entry.type_name}: {features_str}, {size_str}")
+                total_size_mb += entry.size_mb
+                total_features += entry.feature_count
+        
+        typer.echo("\n" + "=" * 60)
+        typer.echo(f"Total: {len(cache_entries)} cache entries, {total_features:,} features, {total_size_mb:.1f} MB")
+        
+        # Show cache statistics
+        stats = dump_manager.get_cache_stats()
+        typer.echo(f"Cache location: {stats['cache_path']}")
+        
+    except Exception as e:
+        typer.echo(f"ERROR: Failed to list cache: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command("clear-cache")
+def clear_cache(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
+    country: Annotated[Optional[str], typer.Option("--country", help="Specific country to clear (optional)")] = None,
+    release: Annotated[Optional[str], typer.Option("--release", help="Specific release to clear (optional)")] = None,
+    confirm: Annotated[bool, typer.Option("--confirm", help="Confirm deletion without prompt")] = False,
+):
+    """
+    Clear cached data entries.
+    
+    Can clear all cache, specific release, or specific country data.
+    Use with caution as this will delete cached data files.
+    """
+    try:
+        # Load minimal config to get dump manager
+        from .dump_manager import DumpManager, DumpConfig
+        import os
+        
+        dump_config = DumpConfig()
+        dump_config.base_path = os.path.abspath('./overturedump')
+        dump_manager = DumpManager(config=dump_config)
+        
+        # Determine what will be cleared
+        if country and release:
+            target = f"cached data for {country} in release {release}"
+        elif country:
+            target = f"all cached data for {country}"
+        elif release:
+            target = f"all cached data for release {release}"
+        else:
+            target = "ALL cached data"
+        
+        # Confirmation prompt
+        if not confirm:
+            if not typer.confirm(f"Are you sure you want to clear {target}?"):
+                typer.echo("Operation cancelled.")
+                return
+        
+        # Perform clearing
+        dump_manager.clear_cache(country=country, release=release)
+        typer.echo(f"Successfully cleared {target}")
+        
+    except Exception as e:
+        typer.echo(f"ERROR: Failed to clear cache: {e}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command("cache-stats")
+def cache_stats(
+    config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
+):
+    """
+    Show cache statistics and storage usage.
+    """
+    try:
+        # Load minimal config to get dump manager
+        from .dump_manager import DumpManager, DumpConfig
+        import os
+        
+        dump_config = DumpConfig()
+        dump_config.base_path = os.path.abspath('./overturedump')
+        dump_manager = DumpManager(config=dump_config)
+        
+        # Get cache statistics
+        stats = dump_manager.get_cache_stats()
+        
+        typer.echo("Cache Statistics")
+        typer.echo("=" * 40)
+        typer.echo(f"Location: {stats['cache_path']}")
+        typer.echo(f"Total files: {stats['total_files']}")
+        typer.echo(f"Countries: {stats['countries']}")
+        typer.echo(f"Releases: {stats['releases']}")
+        typer.echo(f"Total size: {stats['total_size_mb']:.1f} MB ({stats['total_size_mb']/1024:.2f} GB)")
+        
+        if stats['total_files'] > 0:
+            avg_size = stats['total_size_mb'] / stats['total_files']
+            typer.echo(f"Average file size: {avg_size:.1f} MB")
+        
+    except Exception as e:
+        typer.echo(f"ERROR: Failed to get cache statistics: {e}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command("version")

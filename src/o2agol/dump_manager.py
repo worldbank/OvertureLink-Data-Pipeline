@@ -14,12 +14,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Iterator, Union
 
 import duckdb
 import geopandas as gpd
 
 from .config.countries import CountryRegistry
+from .cache_manager import CountryCacheManager, CacheQuery
 
 logger = logging.getLogger(__name__)
 
@@ -66,19 +67,24 @@ class DumpQuery:
 class DumpConfig:
     """Configuration for local dump operations."""
     base_path: str = "/overturedump"
-    max_memory_gb: int = 32
+    max_memory_gb: int = 16  # Reduced from 32GB for optimization
     chunk_size: int = 5  # Countries per chunk
     enable_spatial_index: bool = True
     compression: str = "zstd"
     partitioning: str = "hive"
+    # Cache optimization settings
+    enable_spatial_hash: bool = True
+    use_pyarrow_queries: bool = True
+    # Boundary optimization settings
+    use_world_bank_boundaries: bool = True
+    boundary_simplify_tolerance: float = 0.01
+    enable_boundary_cache: bool = True
 
 
 class DumpManager:
     """
-    Manages local Overture data dumps for improved performance.
-    
     Handles downloading complete themes from S3, storing them locally as Parquet,
-    and providing efficient spatial queries for multiple countries/queries.
+    and providing spatial queries for multiple countries/queries.
     """
     
     # Overture's six official themes
@@ -100,6 +106,21 @@ class DumpManager:
         self.base_path.mkdir(parents=True, exist_ok=True)
         
         self._connection: Optional[duckdb.DuckDBPyConnection] = None
+        
+        # Initialize country cache manager for efficient caching
+        cache_dir = self.base_path / "country_cache"
+        self._cache_manager = CountryCacheManager(cache_dir)
+        
+        # Initialize boundary manager if enabled
+        self._boundary_manager: Optional = None
+        if self.config.enable_boundary_cache:
+            try:
+                from .boundaries import BoundaryManager
+                boundary_cache_dir = self.base_path / "boundaries_cache"
+                self._boundary_manager = BoundaryManager(boundary_cache_dir)
+                logger.debug("Boundary manager initialized")
+            except ImportError as e:
+                logger.warning(f"Could not initialize boundary manager: {e}")
         
         logger.info(f"DumpManager initialized: {self.base_path}")
     
@@ -127,7 +148,24 @@ class DumpManager:
             logger.warning(f"Failed to read dump metadata: {e}")
             return False
     
-    def download_theme(self, release: str, theme: str, validate: bool = True) -> Path:
+    def _delete_dump(self, release: str, theme: str) -> None:
+        """
+        Delete existing dump for release and theme.
+        
+        Args:
+            release: Overture release version (e.g., "2025-07-23.0")
+            theme: Overture theme name
+        """
+        dump_path = self.base_path / release / f"theme={theme}"
+        
+        if dump_path.exists():
+            import shutil
+            logger.info(f"Removing existing dump directory: {dump_path}")
+            shutil.rmtree(dump_path)
+        else:
+            logger.debug(f"No existing dump to remove: {dump_path}")
+    
+    def download_theme(self, release: str, theme: str, validate: bool = True, force_download: bool = False) -> Path:
         """
         Download complete theme from Overture S3 bucket.
         
@@ -135,6 +173,7 @@ class DumpManager:
             release: Overture release version
             theme: Theme to download
             validate: Whether to validate after download
+            force_download: Force re-download even if dump exists
             
         Returns:
             Path to downloaded theme directory
@@ -147,8 +186,14 @@ class DumpManager:
         
         # Check if already downloaded
         if self.check_dump_exists(release, theme):
-            logger.info(f"Dump already exists: {dump_path}")
-            return dump_path
+            if force_download:
+                logger.info(f"Force download requested - removing existing dump: {dump_path}")
+                self._delete_dump(release, theme)
+                # Recreate directory after deletion
+                dump_path.mkdir(parents=True, exist_ok=True)
+            else:
+                logger.info(f"Dump already exists: {dump_path}")
+                return dump_path
         
         # Provide theme size estimates to set user expectations
         theme_size_estimates = {
@@ -222,10 +267,14 @@ class DumpManager:
                 logger.info("Ensuring divisions theme is available for spatial operations...")
                 self._ensure_divisions_available(con, release)
             
-            # Build spatial index if enabled
-            if self.config.enable_spatial_index and theme == "divisions":
-                logger.info("Building spatial index for divisions...")
-                self._build_spatial_index(con, release)
+            # Build spatial indexes for performance
+            if self.config.enable_spatial_index:
+                if theme == "divisions":
+                    logger.info("Building spatial index for divisions...")
+                    self._build_spatial_index(con, release)
+                elif theme in ["transportation", "buildings", "places"]:
+                    logger.info(f"Building bbox index for {theme}...")
+                    self._build_bbox_index(con, release, theme)
             
             # Write metadata
             logger.info("Writing dump metadata...")
@@ -263,17 +312,92 @@ class DumpManager:
         finally:
             con.close()
     
-    def query_local_dump(self, query: DumpQuery, release: str = "latest") -> gpd.GeoDataFrame:
+    # NOTE: The previous "dump" approach of downloading complete themes (50-100GB)
+    # has been replaced with a country-specific caching system that aligns with
+    # Overture Maps best practices and avoids memory issues.
+    # See: https://docs.overturemaps.org/getting-data/duckdb/
+    
+    def query_local_dump(self, query: DumpQuery, release: str = "latest", 
+                        config_obj=None, force_download: bool = False):
         """
-        Query local dump with spatial filtering.
+        Query local cache with efficient country-specific caching.
+        
+        This method uses a country-specific caching system instead of
+        downloading complete themes, as I had performance issues with full dumps.
+        
+        Supports both single-theme queries (returns GeoDataFrame) and dual-theme
+        queries for education/health/markets (returns dict with places + buildings).
         
         Args:
             query: Query configuration
             release: Release version or "latest"
+            config_obj: Configuration object (required for cache misses)
+            force_download: Force refresh of cached data if True
             
         Returns:
-            GeoDataFrame with query results
+            GeoDataFrame for single-theme queries, or dict for dual-theme queries
         """
+        if not query.country:
+            raise ValueError("Country must be specified for cache-based queries")
+        
+        # Resolve latest release
+        if release == "latest":
+            release = self._get_latest_release()
+        
+        # Single-theme query processing
+        # Create cache query (cache stores complete data without limits)
+        cache_query = CacheQuery(
+            country=query.country,
+            theme=query.theme,
+            type_name=query.type,
+            release=release,
+            use_divisions=True,  # Default to divisions for accuracy
+            limit=query.limit,  # Apply limit only on retrieval, not caching
+            filters=query.filters
+        )
+        
+        # Check for force download first
+        if force_download:
+            if config_obj is None:
+                raise ValueError("config_obj is required for forced data extraction")
+            logger.info(f"Force download requested for {query.country}/{query.theme}/{query.type}")
+            gdf = self._cache_manager.cache_country_data(cache_query, config_obj, overwrite=True)
+            return gdf
+        
+        # Try to get from cache first
+        cached_data = self._cache_manager.get_cached_data(cache_query)
+        if cached_data is not None:
+            logger.info(f"Using cached data for {query.country}/{query.theme}/{query.type}")
+            return cached_data
+        
+        # Cache miss - need to extract and cache
+        if config_obj is None:
+            raise ValueError("config_obj is required for cache misses (data extraction)")
+        
+        logger.info(f"Cache miss for {query.country}/{query.theme}/{query.type} - extracting data")
+        
+        # Extract and cache data using proven DuckDB streaming approach
+        gdf = self._cache_manager.cache_country_data(cache_query, config_obj)
+        
+        return gdf
+    
+    def query_local_dump_pyarrow(self, query: DumpQuery, release: str = "latest") -> gpd.GeoDataFrame:
+        """
+        PyArrow-based query for improved performance on local files.
+        Falls back to DuckDB method if PyArrow fails.
+        """
+        if not self.config.use_pyarrow_queries:
+            return self.query_local_dump(query, release)
+        
+        try:
+            return self._query_with_pyarrow(query, release)
+        except Exception as e:
+            logger.warning(f"PyArrow query failed: {e}")
+            logger.info("Falling back to DuckDB query method...")
+            return self.query_local_dump(query, release)
+    
+    def _query_with_pyarrow(self, query: DumpQuery, release: str) -> gpd.GeoDataFrame:
+        """Execute query using PyArrow for better local file performance."""
         # Resolve latest release
         if release == "latest":
             release = self._get_latest_release()
@@ -282,61 +406,329 @@ class DumpManager:
         if not self.check_dump_exists(release, query.theme):
             raise FileNotFoundError(f"Dump not found: {release}/{query.theme}")
         
-        con = self.get_connection(release)
-        
-        # Build base query
+        # Get parquet file path
         dump_path = self.base_path / release / f"theme={query.theme}" / f"type={query.type}"
-        parquet_pattern = f"{dump_path}/data.parquet"
+        parquet_file = dump_path / "data.parquet"
         
-        sql_parts = [f"SELECT * FROM read_parquet('{parquet_pattern}')"]
+        if not parquet_file.exists():
+            raise FileNotFoundError(f"Parquet file not found: {parquet_file}")
         
-        # Add spatial filtering
-        if query.country:
-            if query.bbox:
-                # Use bbox filtering (fast)
-                xmin, ymin, xmax, ymax = query.bbox
-                sql_parts.append(f"""
-                WHERE bbox.xmin >= {xmin} AND bbox.xmax <= {xmax}
-                  AND bbox.ymin >= {ymin} AND bbox.ymax <= {ymax}
-                """)
-            else:
-                # Use precise division filtering
-                country_iso2 = self._resolve_country_code(query.country)
-                sql_parts.append(f"""
-                WHERE ST_Intersects(
-                    geometry,
-                    (SELECT geometry FROM country_boundaries WHERE country = '{country_iso2}')
-                )
-                """)
+        logger.debug(f"Executing PyArrow query on: {parquet_file}")
         
-        # Add custom filters
+        # Build PyArrow filters for better performance
+        filters = self._build_pyarrow_filters(query, release)
+        
+        # Read with filters applied at parquet level (predicate pushdown)
+        columns = self._get_essential_columns(query.type)
+        
+        try:
+            # Use PyArrow's efficient parquet reading
+            table = pq.read_table(
+                parquet_file,
+                columns=columns,
+                filters=filters,
+                use_threads=True
+            )
+            
+            # Convert to pandas
+            df = table.to_pandas()
+            
+            if df.empty:
+                logger.warning("PyArrow query returned no results")
+                return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
+            
+            # Apply limit after initial filtering
+            if query.limit and len(df) > query.limit:
+                df = df.head(query.limit)
+                logger.debug(f"Limited results to {query.limit} records")
+            
+            # Convert geometry and create GeoDataFrame
+            gdf = self._convert_to_geodataframe_pyarrow(df)
+            
+            # Apply spatial filtering if needed
+            if query.country and not self._filters_include_spatial(filters):
+                # Spatial filtering not applied at parquet level, do it now
+                gdf = self._apply_spatial_filter(gdf, query.country, release)
+            
+            logger.info(f"PyArrow query returned {len(gdf)} features")
+            return gdf
+            
+        except Exception as e:
+            logger.error(f"PyArrow query execution failed: {e}")
+            raise
+    
+    def _build_pyarrow_filters(self, query: DumpQuery, release: str) -> List:
+        """Build PyArrow filters for efficient predicate pushdown."""
+        filters = []
+        
+        # Add custom field filters
         if query.filters:
             for field, condition in query.filters.items():
-                sql_parts.append(f"AND {field} {condition}")
+                if isinstance(condition, str) and condition.startswith("="):
+                    value = condition[1:].strip().strip("'\"")
+                    filters.append((field, '==', value))
+                elif isinstance(condition, str) and " IN " in condition.upper():
+                    # Handle IN clauses
+                    values_part = condition.upper().split(" IN ")[1].strip("()")
+                    values = [v.strip().strip("'\"") for v in values_part.split(",")]
+                    filters.append((field, 'in', values))
         
-        # Add limit
-        if query.limit:
-            sql_parts.append(f"LIMIT {query.limit}")
+        # Add bbox filter if available (much faster than spatial intersection)
+        if query.country and query.bbox:
+            xmin, ymin, xmax, ymax = query.bbox
+            # Note: PyArrow filters on bbox columns would need to be implemented
+            # depending on Overture schema structure
         
-        sql = " ".join(sql_parts)
+        return filters
+    
+    def _get_essential_columns(self, type_name: str) -> List[str]:
+        """Get essential columns for a data type to minimize I/O."""
+        # Import from existing duck.py module
+        try:
+            from .duck import _get_columns_for_target_type
+            columns = _get_columns_for_target_type(type_name)
+            return columns + ['geometry', 'bbox']  # Always include geometry and bbox
+        except Exception:
+            # Fallback: return None to read all columns
+            return None
+    
+    def _convert_to_geodataframe_pyarrow(self, df) -> gpd.GeoDataFrame:
+        """Convert pandas DataFrame to GeoDataFrame with robust geometry handling."""
+        def convert_geometry_robust(geom_data):
+            """Convert geometry data handling multiple formats."""
+            if geom_data is None:
+                return None
+            
+            try:
+                if isinstance(geom_data, (bytes, bytearray)):
+                    import shapely.wkb as swkb
+                    return swkb.loads(bytes(geom_data))
+                elif hasattr(geom_data, 'geom_type'):
+                    return geom_data  # Already a shapely geometry
+                else:
+                    logger.debug(f"Unexpected geometry type: {type(geom_data)}")
+                    return None
+            except Exception as e:
+                logger.debug(f"Failed to convert geometry: {e}")
+                return None
         
-        # Execute query
-        logger.debug(f"Executing local dump query: {sql}")
-        result_df = con.execute(sql).df()
+        # Convert geometries
+        if 'geometry' in df.columns:
+            geometry_series = df['geometry'].apply(convert_geometry_robust)
+            df_clean = df.drop(columns=['geometry'])
+            
+            gdf = gpd.GeoDataFrame(
+                df_clean,
+                geometry=geometry_series,
+                crs="EPSG:4326"
+            )
+        else:
+            # No geometry column found
+            logger.warning("No geometry column found in data")
+            gdf = gpd.GeoDataFrame(df, crs="EPSG:4326")
         
-        if result_df.empty:
-            logger.warning("Query returned no results")
-            return gpd.GeoDataFrame(columns=['geometry'], crs="EPSG:4326")
-        
-        # Convert to GeoDataFrame
-        gdf = gpd.GeoDataFrame(
-            result_df,
-            geometry=gpd.GeoSeries.from_wkb(result_df['geometry']),
-            crs="EPSG:4326"
-        )
-        
-        logger.info(f"Local dump query returned {len(gdf)} features")
         return gdf
+    
+    def _filters_include_spatial(self, filters: List) -> bool:
+        """Check if filters already include spatial filtering."""
+        # This would be implemented based on the specific filter structure
+        # For now, return False to always apply spatial filtering
+        return False
+    
+    def _apply_spatial_filter(self, gdf: gpd.GeoDataFrame, country: str, release: str) -> gpd.GeoDataFrame:
+        """Apply spatial filtering using cached boundaries."""
+        try:
+            # Use spatial hash if available
+            if self.config.enable_spatial_hash:
+                hash_index = self._load_spatial_hash(release, gdf.columns[0])  # Theme name approximation
+                if hash_index and country in hash_index:
+                    relevant_indices = hash_index[country]
+                    gdf = gdf.iloc[relevant_indices]
+                    return gdf
+            
+            # Fallback to boundary intersection
+            country_iso2 = self._resolve_country_code(country)
+            
+            # Try to get cached boundary
+            boundary_geom = self._get_cached_boundary(country_iso2, release)
+            if boundary_geom is not None:
+                mask = gdf.geometry.intersects(boundary_geom)
+                gdf = gdf[mask]
+            
+            return gdf
+            
+        except Exception as e:
+            logger.warning(f"Spatial filtering failed: {e}")
+            return gdf  # Return unfiltered data
+    
+    def _get_cached_boundary(self, country_iso2: str, release: str) -> Optional:
+        """Get cached country boundary geometry using optimized boundary manager."""
+        try:
+            # Use boundary manager if available and enabled
+            if self._boundary_manager and self.config.use_world_bank_boundaries:
+                from .boundaries import BoundarySource
+                
+                # Try World Bank first, fallback to Natural Earth
+                boundary = self._boundary_manager.get_boundary(
+                    country_iso2, 
+                    source=BoundarySource.WORLD_BANK,
+                    simplify_tolerance=self.config.boundary_simplify_tolerance
+                )
+                
+                if boundary:
+                    logger.debug(f"Using optimized boundary for {country_iso2}")
+                    return boundary
+                
+                # Fallback to Natural Earth
+                boundary = self._boundary_manager.get_boundary(
+                    country_iso2,
+                    source=BoundarySource.NATURAL_EARTH,
+                    simplify_tolerance=self.config.boundary_simplify_tolerance
+                )
+                
+                if boundary:
+                    logger.debug(f"Using Natural Earth boundary for {country_iso2}")
+                    return boundary
+            
+            # Fallback to Overture divisions (original method)
+            logger.debug(f"Using Overture divisions boundary for {country_iso2}")
+            divisions_path = self.base_path / release / "theme=divisions" / "type=division_area" / "data.parquet"
+            if not divisions_path.exists():
+                return None
+            
+            # Use PyArrow to efficiently read just the needed country
+            table = pq.read_table(
+                divisions_path,
+                filters=[('country', '==', country_iso2)],
+                columns=['geometry']
+            )
+            
+            if len(table) == 0:
+                return None
+            
+            # Convert first geometry
+            df = table.to_pandas()
+            gdf = self._convert_to_geodataframe_pyarrow(df)
+            
+            if len(gdf) > 0:
+                geometry = gdf.geometry.iloc[0]
+                
+                # Apply simplification if configured
+                if self.config.boundary_simplify_tolerance > 0:
+                    geometry = geometry.simplify(
+                        self.config.boundary_simplify_tolerance, 
+                        preserve_topology=True
+                    )
+                
+                return geometry
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Could not load cached boundary for {country_iso2}: {e}")
+            return None
+    
+    def _build_spatial_hash(self, release: str, theme: str):
+        """Build spatial hash index for fast country lookups."""
+        try:
+            hash_file = self.base_path / release / f"spatial_hash_{theme}.json"
+            
+            if hash_file.exists():
+                logger.debug(f"Spatial hash already exists: {hash_file}")
+                return
+            
+            logger.info(f"Building spatial hash index for {theme}...")
+            
+            # Load theme data efficiently
+            theme_path = self.base_path / release / f"theme={theme}"
+            hash_data = {}
+            
+            # For each type in theme
+            for type_dir in theme_path.iterdir():
+                if type_dir.is_dir() and type_dir.name.startswith("type="):
+                    parquet_file = type_dir / "data.parquet"
+                    if parquet_file.exists():
+                        type_name = type_dir.name.replace("type=", "")
+                        hash_data[type_name] = self._compute_spatial_hash_for_type(
+                            parquet_file, release
+                        )
+            
+            # Save hash index
+            with open(hash_file, 'w') as f:
+                json.dump(hash_data, f, indent=2)
+            
+            logger.info(f"✓ Spatial hash index built: {hash_file}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to build spatial hash index: {e}")
+    
+    def _compute_spatial_hash_for_type(self, parquet_file: Path, release: str) -> Dict:
+        """Compute spatial hash mapping countries to feature indices."""
+        try:
+            # Load divisions for country boundaries
+            divisions_path = self.base_path / release / "theme=divisions" / "type=division_area" / "data.parquet"
+            if not divisions_path.exists():
+                return {}
+            
+            # Read country boundaries
+            divisions_table = pq.read_table(divisions_path, columns=['country', 'geometry'])
+            divisions_df = divisions_table.to_pandas()
+            divisions_gdf = self._convert_to_geodataframe_pyarrow(divisions_df)
+            
+            # Build spatial index for divisions
+            divisions_sindex = divisions_gdf.sindex
+            
+            # Read theme data in chunks to manage memory
+            hash_mapping = {}
+            chunk_size = 100000
+            
+            parquet_file_obj = pq.ParquetFile(parquet_file)
+            
+            for batch_idx, batch in enumerate(parquet_file_obj.iter_batches(batch_size=chunk_size)):
+                batch_df = batch.to_pandas()
+                
+                if 'geometry' not in batch_df.columns:
+                    continue
+                
+                batch_gdf = self._convert_to_geodataframe_pyarrow(batch_df)
+                batch_sindex = batch_gdf.sindex
+                
+                # For each country, find intersecting features
+                for country_idx, country_row in divisions_gdf.iterrows():
+                    country_code = country_row['country']
+                    country_geom = country_row['geometry']
+                    
+                    if country_code not in hash_mapping:
+                        hash_mapping[country_code] = []
+                    
+                    # Use spatial index for fast intersection
+                    possible_matches_idx = list(batch_sindex.intersection(country_geom.bounds))
+                    
+                    if possible_matches_idx:
+                        possible_matches = batch_gdf.iloc[possible_matches_idx]
+                        precise_matches = possible_matches[possible_matches.geometry.intersects(country_geom)]
+                        
+                        # Add global indices (accounting for batch offset)
+                        global_indices = [batch_idx * chunk_size + idx for idx in precise_matches.index]
+                        hash_mapping[country_code].extend(global_indices)
+            
+            return hash_mapping
+            
+        except Exception as e:
+            logger.warning(f"Failed to compute spatial hash: {e}")
+            return {}
+    
+    def _load_spatial_hash(self, release: str, theme: str) -> Optional[Dict]:
+        """Load spatial hash index for fast lookups."""
+        try:
+            hash_file = self.base_path / release / f"spatial_hash_{theme}.json"
+            if hash_file.exists():
+                with open(hash_file, 'r') as f:
+                    return json.load(f)
+            return None
+        except Exception as e:
+            logger.debug(f"Could not load spatial hash: {e}")
+            return None
     
     def get_connection(self, release: str) -> duckdb.DuckDBPyConnection:
         """Get optimized DuckDB connection for local queries."""
@@ -457,7 +849,7 @@ class DumpManager:
                 shutil.rmtree(release_path)
     
     def _setup_download_connection(self) -> duckdb.DuckDBPyConnection:
-        """Setup optimized DuckDB connection for downloads."""
+        """Setup DuckDB connection for downloads."""
         con = duckdb.connect()
         
         # Install extensions
@@ -479,7 +871,7 @@ class DumpManager:
         return con
     
     def _setup_query_connection(self, release: str) -> duckdb.DuckDBPyConnection:
-        """Setup optimized DuckDB connection for local queries."""
+        """Setup DuckDB connection for local queries."""
         con = duckdb.connect()
         
         # Install extensions
@@ -489,6 +881,13 @@ class DumpManager:
         memory_limit = f"{self.config.max_memory_gb}GB"
         con.execute(f"SET memory_limit='{memory_limit}';")
         con.execute(f"SET threads={min(os.cpu_count() or 8, 16)};")
+        
+        # Local parquet optimizations
+        con.execute("SET preserve_insertion_order=false;")
+        con.execute("SET enable_progress_bar=true;")
+        # Note: max_memory is automatically managed by memory_limit setting above
+        
+        # Spatial query optimizations for local files (using valid DuckDB settings)
         
         # Setup spatial index view if divisions available
         divisions_path = self.base_path / release / "theme=divisions" / "type=division_area" / "data.parquet"
@@ -504,7 +903,7 @@ class DumpManager:
             FROM read_parquet('{divisions_path}')
             WHERE subtype = 'country'
             """)
-            logger.debug("Spatial index view created")
+            logger.debug("Spatial index view created for local queries")
         
         return con
     
@@ -561,6 +960,31 @@ class DumpManager:
             logger.info("Spatial index built successfully")
         except Exception as e:
             logger.warning(f"Failed to build spatial index: {e}")
+
+    def _build_bbox_index(self, con: duckdb.DuckDBPyConnection, release: str, theme: str) -> None:
+        """Build bbox-based index for faster spatial filtering on data themes."""
+        theme_path = self.base_path / release / f"theme={theme}"
+        
+        for type_dir in theme_path.iterdir():
+            if type_dir.is_dir() and type_dir.name.startswith("type="):
+                parquet_file = type_dir / "data.parquet"
+                if parquet_file.exists():
+                    try:
+                        # Create bbox statistics for faster queries
+                        index_sql = f"""
+                        CREATE TABLE IF NOT EXISTS {theme}_bbox_stats AS
+                        SELECT 
+                            COUNT(*) as total_records,
+                            MIN(bbox.xmin) as min_x,
+                            MAX(bbox.xmax) as max_x,
+                            MIN(bbox.ymin) as min_y,
+                            MAX(bbox.ymax) as max_y
+                        FROM read_parquet('{parquet_file}')
+                        """
+                        con.execute(index_sql)
+                        logger.debug(f"Built bbox index for {theme}")
+                    except Exception as e:
+                        logger.warning(f"Failed to build bbox index for {theme}: {e}")
     
     def _get_latest_release(self) -> str:
         """Get the latest available release."""
@@ -584,11 +1008,170 @@ class DumpManager:
     
     def _resolve_country_code(self, country_input: str) -> str:
         """Resolve country name/code to ISO2 code."""
-        registry = CountryRegistry()
-        country_data = registry.get_country_info(country_input)
+        country_data = CountryRegistry.get_country(country_input)
         if not country_data:
             raise ValueError(f"Unknown country: {country_input}")
-        return country_data['iso2']
+        return country_data.iso2
+    
+    def cache_country_data(self, country: str, theme: str, type_name: str,
+                          config_obj, release: str = "latest", 
+                          overwrite: bool = False) -> gpd.GeoDataFrame:
+        """
+        Cache data for a specific country/theme/type combination.
+        
+        Args:
+            country: Country code or name
+            theme: Overture theme
+            type_name: Overture type
+            config_obj: Configuration object
+            release: Release version
+            overwrite: Whether to overwrite existing cache
+            
+        Returns:
+            GeoDataFrame with cached data
+        """
+        cache_query = CacheQuery(
+            country=country,
+            theme=theme,
+            type_name=type_name,
+            release=release,
+            use_divisions=True
+        )
+        
+        return self._cache_manager.cache_country_data(cache_query, config_obj, overwrite)
+    
+    def list_cached_data(self, release: str = "latest") -> List:
+        """
+        List all cached data entries.
+        
+        Args:
+            release: Release version
+            
+        Returns:
+            List of cache metadata entries
+        """
+        return self._cache_manager.list_cached_countries(release)
+    
+    def clear_cache(self, country: Optional[str] = None, 
+                   release: Optional[str] = None) -> None:
+        """
+        Clear cache entries.
+        
+        Args:
+            country: Specific country to clear (optional)
+            release: Specific release to clear (optional)
+        """
+        self._cache_manager.clear_cache(country, release)
+    
+    def get_cache_stats(self) -> Dict:
+        """
+        Get cache statistics.
+        
+        Returns:
+            Dictionary with cache statistics
+        """
+        return self._cache_manager.get_cache_stats()
+    
+    def query_dual_theme(self, query: DumpQuery, building_filter: str, release: str = "latest", 
+                         config_obj=None, force_download: bool = False) -> Dict[str, gpd.GeoDataFrame]:
+        """
+        Handle dual-theme queries that require both places and buildings data.
+        
+        Args:
+            query: Original query configuration (places theme)
+            building_filter: Filter to apply to buildings data
+            release: Release version or "latest"
+            config_obj: Configuration object (required for cache misses)
+            force_download: Force refresh of cached data if True
+            
+        Returns:
+            Dictionary with 'places' and 'buildings' GeoDataFrames
+        """
+        # Resolve latest release
+        if release == "latest":
+            release = self._get_latest_release()
+        
+        logger.info(f"Processing dual-theme query: places + buildings for {query.country}")
+        
+        result = {}
+        
+        # Query 1: Places data (original query)
+        places_query = CacheQuery(
+            country=query.country,
+            theme=query.theme,  # 'places'
+            type_name=query.type,  # 'place' 
+            release=release,
+            use_divisions=True,
+            limit=query.limit,
+            filters=query.filters
+        )
+        
+        logger.info(f"Querying places data for {query.country}")
+        if force_download:
+            places_gdf = self._cache_manager.cache_country_data(places_query, config_obj, overwrite=True)
+        else:
+            places_gdf = self._cache_manager.get_cached_data(places_query)
+            if places_gdf is None:
+                logger.info(f"Places cache miss - extracting data")
+                places_gdf = self._cache_manager.cache_country_data(places_query, config_obj)
+        
+        if not places_gdf.empty:
+            result['places'] = places_gdf
+            logger.info(f"Retrieved {len(places_gdf):,} places features")
+        
+        # Query 2: Buildings data - cache complete data, apply filter during retrieval
+        # Create separate queries for caching and filtering
+        buildings_cache_query = CacheQuery(
+            country=query.country,
+            theme='buildings',
+            type_name='building',
+            release=release,
+            use_divisions=True,
+            limit=None,  # No limit for caching
+            filters=None  # No filter for caching - cache ALL buildings
+        )
+        
+        buildings_filter_query = CacheQuery(
+            country=query.country,
+            theme='buildings',
+            type_name='building',
+            release=release,
+            use_divisions=True,
+            limit=query.limit,
+            filters=building_filter if building_filter else None  # Apply filter during retrieval
+        )
+        
+        logger.info(f"Querying buildings data for {query.country}")
+        if force_download:
+            # Force recache complete buildings data (no filter)
+            buildings_gdf = self._cache_manager.cache_country_data(buildings_cache_query, config_obj, overwrite=True)
+            # Apply filter to the complete cached data
+            if building_filter:
+                original_count = len(buildings_gdf)
+                from .cache_manager import apply_sql_filter
+                buildings_gdf = apply_sql_filter(buildings_gdf, building_filter)
+                logger.info(f"Applied building filter: {original_count:,} -> {len(buildings_gdf):,} features")
+            # Apply limit if specified
+            if query.limit:
+                buildings_gdf = buildings_gdf.head(query.limit)
+        else:
+            # Try to get filtered data from cache
+            buildings_gdf = self._cache_manager.get_cached_data(buildings_filter_query)
+            if buildings_gdf is None:
+                logger.info(f"Buildings cache miss - extracting complete data")
+                # Cache complete buildings data (no filter)
+                self._cache_manager.cache_country_data(buildings_cache_query, config_obj)
+                # Now get the filtered data
+                buildings_gdf = self._cache_manager.get_cached_data(buildings_filter_query)
+        
+        if not buildings_gdf.empty:
+            result['buildings'] = buildings_gdf  
+            logger.info(f"Retrieved {len(buildings_gdf):,} buildings features")
+        
+        total_features = sum(len(gdf) for gdf in result.values())
+        logger.info(f"Dual-theme query complete: {total_features:,} total features across {len(result)} layers")
+        
+        return result
     
     def close(self) -> None:
         """Close database connection."""

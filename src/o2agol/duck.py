@@ -395,8 +395,11 @@ def _fetch_via_temp_file(con: duckdb.DuckDBPyConnection, sql: str) -> gpd.GeoDat
                 elif isinstance(g, bytes):
                     # Convert WKB bytes to shapely geometry
                     return swkb.loads(g)
+                elif isinstance(g, bytearray):
+                    # Convert bytearray to bytes then to shapely geometry
+                    return swkb.loads(bytes(g))
                 else:
-                    # Already a geometry object
+                    # Already a geometry object or handle unexpected types
                     return g
             
             df["geometry"] = df["geom"].apply(convert_geometry)
@@ -642,8 +645,13 @@ def _fetch_from_local_dump(config_obj, target_name: str, dump_manager, **kwargs)
     # Get release version
     release = overture_config.get('release', '2025-07-23.0')
     
-    # Execute query
-    gdf = dump_manager.query_local_dump(query, release)
+    # Execute query using optimized method if available
+    if hasattr(dump_manager, 'query_local_dump_pyarrow') and dump_manager.config.use_pyarrow_queries:
+        logging.debug("Using PyArrow-optimized query method")
+        gdf = dump_manager.query_local_dump_pyarrow(query, release)
+    else:
+        logging.debug("Using cache-based query method")
+        gdf = dump_manager.query_local_dump(query, release, secure_config)
     
     if gdf.empty:
         logging.warning("Local dump query returned no results")
@@ -700,7 +708,11 @@ def _fetch_from_local_dump(config_obj, target_name: str, dump_manager, **kwargs)
             limit=limit
         )
         
-        buildings_gdf = dump_manager.query_local_dump(buildings_query, release)
+        # Use same optimized query method for buildings
+        if hasattr(dump_manager, 'query_local_dump_pyarrow') and dump_manager.config.use_pyarrow_queries:
+            buildings_gdf = dump_manager.query_local_dump_pyarrow(buildings_query, release)
+        else:
+            buildings_gdf = dump_manager.query_local_dump(buildings_query, release, secure_config)
         
         if not buildings_gdf.empty:
             # Apply building filter

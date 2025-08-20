@@ -11,6 +11,8 @@ Environment Variables (AGOL_ standard):
     AGOL_PORTAL_URL: ArcGIS Online portal URL
     AGOL_USERNAME: Username for ArcGIS Online
     AGOL_PASSWORD: Password for ArcGIS Online
+    AGOL_TOKEN_EXPIRATION: Token expiration in minutes (default: 9999 for large datasets)
+    AGOL_LARGE_DATASET_THRESHOLD: Feature count threshold for large dataset detection (default: 10000)
     DUCKDB_MEMORY_LIMIT: Memory limit for DuckDB
     DUCKDB_THREADS: Number of threads for DuckDB
 """
@@ -33,6 +35,8 @@ class AGOLCredentials:
     portal_url: str
     username: str
     password: str
+    token_expiration: int = 9999  # Extended default for large datasets
+    large_dataset_threshold: int = 10000  # Feature count threshold
     
     def __post_init__(self):
         """Validate credential format."""
@@ -44,6 +48,12 @@ class AGOLCredentials:
         
         if len(self.password) < 8:
             raise ValueError("Password must be at least 8 characters")
+        
+        if self.token_expiration < 1:
+            raise ValueError("Token expiration must be positive")
+        
+        if self.large_dataset_threshold < 1:
+            raise ValueError("Large dataset threshold must be positive")
 
 
 @dataclass
@@ -246,6 +256,10 @@ class Config:
         username = os.getenv("AGOL_USERNAME") or os.getenv("ARCGIS_USERNAME")
         password = os.getenv("AGOL_PASSWORD") or os.getenv("ARCGIS_PASSWORD")
         
+        # Timeout configuration with sensible defaults
+        token_expiration = int(os.getenv("AGOL_TOKEN_EXPIRATION", "9999"))
+        large_dataset_threshold = int(os.getenv("AGOL_LARGE_DATASET_THRESHOLD", "10000"))
+        
         if not all([portal_url, username, password]):
             missing = []
             if not portal_url:
@@ -260,7 +274,9 @@ class Config:
                 f"Please set these variables in your .env file:\n"
                 f"  AGOL_PORTAL_URL=https://geowb.maps.arcgis.com\n"
                 f"  AGOL_USERNAME=your_username\n"
-                f"  AGOL_PASSWORD=your_password\n\n"
+                f"  AGOL_PASSWORD=your_password\n"
+                f"  AGOL_TOKEN_EXPIRATION=9999  # Optional: Extended timeout for large datasets\n"
+                f"  AGOL_LARGE_DATASET_THRESHOLD=10000  # Optional: Feature count threshold\n\n"
                 f"Current .env file: {self.project_root / '.env'}"
             )
         
@@ -268,7 +284,9 @@ class Config:
             self.agol = AGOLCredentials(
                 portal_url=portal_url,
                 username=username,
-                password=password
+                password=password,
+                token_expiration=token_expiration,
+                large_dataset_threshold=large_dataset_threshold
             )
         except ValueError as e:
             raise ConfigurationError(f"Invalid ArcGIS configuration: {e}")
@@ -339,9 +357,12 @@ class Config:
         except ValueError as e:
             raise ConfigurationError(f"Invalid dump configuration: {e}")
     
-    def create_gis_connection(self) -> GIS:
+    def create_gis_connection(self, expiration: Optional[int] = None) -> GIS:
         """
-        Create authenticated ArcGIS Online connection.
+        Create authenticated ArcGIS Online connection with extended timeout support.
+        
+        Args:
+            expiration: Token expiration time in minutes (uses configured default if None)
         
         Returns:
             Authenticated GIS connection object
@@ -349,17 +370,22 @@ class Config:
         Raises:
             ConfigurationError: If connection fails due to invalid credentials
         """
+        # Use provided expiration or fall back to configured default
+        token_expiration = expiration if expiration is not None else self.agol.token_expiration
+        
         try:
             gis = GIS(
                 url=self.agol.portal_url,
                 username=self.agol.username,
-                password=self.agol.password
+                password=self.agol.password,
+                expiration=token_expiration  # Extended expiration for long-running operations
             )
             
             # Verify connection by accessing user properties
             user_info = gis.users.me
             logger.info(f"Connected to ArcGIS Online as {user_info.username}")
             logger.info(f"Organization: {gis.properties.name}")
+            logger.info(f"Token expiration set to {token_expiration} minutes")
             
             return gis
             
