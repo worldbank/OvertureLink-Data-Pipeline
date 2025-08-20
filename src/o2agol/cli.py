@@ -1401,7 +1401,7 @@ def overture_dump(
                     layers_info = []
                     for layer_name, layer_gdf in transformed_data.items():
                         layer_type = "points" if "places" in layer_name else "polygons"
-                        layers_info.append(f"Updated layer {country_info.iso3}_{query}_{layer_type} ({len(layer_gdf):,} features)")
+                        layers_info.append(f"Updated layer {country_info.iso3.lower()}_{query}_{layer_type} ({len(layer_gdf):,} features)")
                     
                     for info in layers_info:
                         pipeline_logger.info(info)

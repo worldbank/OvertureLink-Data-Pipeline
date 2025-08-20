@@ -182,13 +182,17 @@ class TemplateConfigParser:
             'country_name': self.country.name,
             'iso2': self.country.iso2,
             'iso3': self.country.iso3,
+            'iso3_lower': self.country.iso3.lower(),
             'region': self.country.region,
             
             # Organization
-            'organization': self.organization.name,
+            'organization': self.organization.attribution,
             'contact_email': self.organization.contact_email,
             'license': self.organization.license,
             'update_frequency': self.organization.update_frequency,
+            
+            # AGOL Metadata templates
+            'attribution': self.templates.get('attribution', ''),
             
             # Overture data
             'release': release,
