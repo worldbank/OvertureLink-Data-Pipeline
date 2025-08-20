@@ -1099,18 +1099,7 @@ def overture_dump(
             secs = seconds % 60
             return f"{minutes}m {secs:.1f}s"
     
-    def log_phase_start(phase_name: str) -> float:
-        """Log phase start and return start time."""
-        logging.info("=" * 60)
-        logging.info(f"PHASE: {phase_name}")
-        logging.info("=" * 60)
-        return time.time()
-    
-    def log_phase_end(phase_name: str, start_time: float) -> float:
-        """Log phase completion and return duration."""
-        duration = time.time() - start_time
-        logging.info(f"{phase_name} completed in {format_duration(duration)}")
-        return duration
+    # Note: Phase logging now handled by PipelineLogger in the main flow
     
     # Initialize pipeline logger
     base_logger = logging.getLogger(__name__)
@@ -1118,7 +1107,21 @@ def overture_dump(
     
     # Capture original command for reference
     import sys
-    original_command = " ".join(sys.argv)
+    import os
+    
+    # Extract just the command name and arguments, not the full file path
+    if sys.argv and sys.argv[0]:
+        command_name = os.path.basename(sys.argv[0])
+        # Remove .py extension if present
+        if command_name.endswith('.py'):
+            command_name = command_name[:-3]
+        # Handle Windows .exe or just the script name
+        if command_name.endswith('.exe'):
+            command_name = command_name[:-4]
+        command_args = sys.argv[1:] if len(sys.argv) > 1 else []
+        original_command = f"{command_name} {' '.join(command_args)}" if command_args else command_name
+    else:
+        original_command = "o2agol overture-dump"  # Fallback
     
     # Start overall timing
     operation_start_time = time.time()
@@ -1162,8 +1165,7 @@ def overture_dump(
     # Initialize dump manager with cache system
     dump_manager = DumpManager(config=dump_config)
     
-    # End Phase 1
-    phase_times['configuration'] = log_phase_end("CONFIGURATION & SETUP", phase1_start)
+    # Configuration phase complete
     logging.info(f"Cache storage location: {dump_manager.base_path}/country_cache")
     logging.info(f"Using country-specific caching approach")
     logging.info(f"Boundary optimization: world_bank={use_world_bank}")
@@ -1220,23 +1222,22 @@ def overture_dump(
             logging.error(f"Configuration validation failed: {e}")
             raise typer.Exit(1)
     
-    # Handle download_only mode by caching data for the country
+    # Handle download_only mode by caching data for the country  
     if download_only:
-        logging.info("Cache-only mode - extracting and caching data without processing...")
+        cache_start = time.time()
+        pipeline_logger.info("")
+        pipeline_logger.phase("PHASE 1: CACHE DOWNLOAD")
         
         try:
-            from .config.countries import CountryRegistry
-            
-            country_info = CountryRegistry.get_country(country)
-            if not country_info:
-                raise ValueError(f"Unknown country: {country}")
-            
             # Cache data for each required theme
+            total_features = 0
             for theme_to_cache in themes_to_download:
                 type_name = target_config['type'] if theme_to_cache == theme else 'building'
                 
-                logging.info(f"Caching {theme_to_cache} data for {country_info.name}...")
-                dump_manager.cache_country_data(
+                theme_desc = "transportation" if theme_to_cache == "roads" else f"{theme_to_cache} facilities"
+                pipeline_logger.info(f"Caching {theme_desc} for {country_info.name}")
+                
+                result_gdf = dump_manager.cache_country_data(
                     country=country_info.iso2,
                     theme=theme_to_cache,
                     type_name=type_name,
@@ -1244,13 +1245,28 @@ def overture_dump(
                     release=release,
                     overwrite=force_download
                 )
-                logging.info(f"Successfully cached {theme_to_cache} data for {country_info.name}")
+                
+                if result_gdf is not None and not result_gdf.empty:
+                    total_features += len(result_gdf)
             
-            logging.info("Cache complete. Exiting.")
+            # Phase completion timing
+            cache_duration = time.time() - cache_start
+            pipeline_logger.info(f"Acquired {total_features:,} features")
+            pipeline_logger.info(f"Phase completed in {format_duration(cache_duration)}")
+            
+            # Final summary for download-only
+            total_duration = time.time() - operation_start_time
+            pipeline_logger.info("")
+            pipeline_logger.info("============ OPERATION COMPLETE ============")
+            pipeline_logger.info(f"Total execution time: {format_duration(total_duration)}")
+            pipeline_logger.info("Performance breakdown:")
+            pipeline_logger.info(f"  Configuration: {format_duration(cache_start - operation_start_time)} ({((cache_start - operation_start_time)/total_duration*100):.1f}%)")
+            pipeline_logger.info(f"  Cache Download: {format_duration(cache_duration)} ({(cache_duration/total_duration*100):.1f}%)")
+            
             return
             
         except Exception as e:
-            logging.error(f"Failed to cache data: {e}")
+            pipeline_logger.info(f"Failed to cache data: {e}")
             raise typer.Exit(1)
     
     # Process query using local dump
