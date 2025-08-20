@@ -57,14 +57,17 @@ def normalize_schema(
     if gdf.crs is None or gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(4326)
 
+    # Apply field name sanitization first, before field selection
+    gdf = sanitize_field_names(gdf, layer_type=layer)
+
     # Handle different layer types with appropriate field selection
     if layer in ["roads"]:
-        # Transportation data - use original simple approach that worked. "names", "routes" had issues. To investigate.
-        keep = [c for c in ["id", "class", "subtype"] if c in gdf.columns]
+        # Transportation data - use sanitized field names
+        keep = [c for c in ["id", "road_class", "subtype"] if c in gdf.columns]
         
     elif layer in ["buildings"]:
-        # Building data  
-        keep = [c for c in ["id", "names", "class", "subtype", "height", "num_floors"] if c in gdf.columns]
+        # Building data - use standard field names
+        keep = [c for c in ["id", "name", "feature_class", "subtype", "height", "floor_count"] if c in gdf.columns]
         
     elif layer in ["education", "health", "markets", "places"]:
         # Mixed places and buildings data - handle unified schema
@@ -82,7 +85,7 @@ def normalize_schema(
         
         # Create unified type_category field from places categories or building class
         # Optimized for GeoPandas 1.0+ with vectorized operations
-        if "categories" in gdf.columns or "class" in gdf.columns:
+        if "categories" in gdf.columns or "feature_class" in gdf.columns:
             # Initialize with None
             gdf["type_category"] = None
             
@@ -92,9 +95,9 @@ def normalize_schema(
                 gdf.loc[place_mask, "type_category"] = gdf.loc[place_mask, "categories"].apply(extract_primary_category)
             
             # Vectorized assignment for buildings
-            if "class" in gdf.columns and "source_type" in gdf.columns:
+            if "feature_class" in gdf.columns and "source_type" in gdf.columns:
                 building_mask = gdf["source_type"] == "building"
-                gdf.loc[building_mask, "type_category"] = gdf.loc[building_mask, "class"]
+                gdf.loc[building_mask, "type_category"] = gdf.loc[building_mask, "feature_class"]
             
             keep.append("type_category")
         
@@ -111,17 +114,17 @@ def normalize_schema(
             gdf["address"] = gdf["addresses"].apply(extract_formatted_address)
             keep.append("address")
         
-        # Building-specific fields
+        # Building-specific fields (using sanitized names)
         if "height" in gdf.columns:
             keep.append("height")
-        if "num_floors" in gdf.columns:
-            keep.append("num_floors")
+        if "floor_count" in gdf.columns:
+            keep.append("floor_count")
         if "subtype" in gdf.columns:
             keep.append("subtype")
     
     else:
-        # Default fallback
-        keep = [c for c in ["id", "class", "subtype"] if c in gdf.columns]
+        # Default fallback - use sanitized field names
+        keep = [c for c in ["id", "feature_type", "subtype"] if c in gdf.columns]
     
     # Ensure geometry is included
     cols = keep + ["geometry"]
@@ -130,6 +133,15 @@ def normalize_schema(
     # Ensure id is string (for AGOL upsert)
     if "id" in gdf.columns:
         gdf["id"] = gdf["id"].astype(str)
+    
+    # Apply data type validation for numeric fields
+    if "height" in gdf.columns:
+        # Convert height to float, handle null values
+        gdf["height"] = gdf["height"].apply(lambda x: float(x) if x is not None and str(x).replace('.', '', 1).replace('-', '', 1).isdigit() else None)
+    
+    if "floor_count" in gdf.columns:
+        # Convert floor_count to integer, handle null values
+        gdf["floor_count"] = gdf["floor_count"].apply(lambda x: int(float(x)) if x is not None and str(x).replace('.', '', 1).replace('-', '', 1).isdigit() else None)
 
     return gdf
 
