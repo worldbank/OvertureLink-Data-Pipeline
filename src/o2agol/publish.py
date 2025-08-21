@@ -699,27 +699,7 @@ def _append_via_batches(
     if not append_success:
         raise RuntimeError("Append via item failed")
         
-            edit_result = feature_layer.edit_features(adds=feature_set.features)
-            
-            add_results = edit_result.get('addResults', [])
-            batch_successful = sum(1 for r in add_results if r.get('success', False))
-            successful_adds += batch_successful
-            
-            logging.info(f"Batch {batch_num}/{total_batches}: {batch_successful:,}/{len(batch_gdf):,} features added")
-            
-            if batch_successful < len(batch_gdf):
-                failed_count = len(batch_gdf) - batch_successful
-                logging.warning(f"Batch {batch_num}: {failed_count} features failed")
-                
-        except Exception as batch_error:
-            logging.error(f"Batch {batch_num} failed: {batch_error}")
-    
-    if successful_adds != total_features:
-        logging.warning(f"Partial upload: {successful_adds:,}/{total_features:,} features uploaded")
-        if successful_adds == 0:
-            raise RuntimeError("All batches failed - no features were uploaded")
-    else:
-        logging.info(f"Batch append completed successfully: {successful_adds:,} features uploaded")
+    logging.info(f"Append completed: {total_features:,} features")
 
 
 def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
@@ -981,7 +961,6 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
             logging.info("Existing data cleared")
         
         # Update approach for monthly data replacement while preserving item_id
-        # CRITICAL FIX: Always prepare data before any update operations
         logging.info(f"Preparing {len(gdf):,} features for overwrite/append")
         prepared_gdf = _prepare_gdf_for_agol(gdf, "single-layer-update")
         
@@ -997,10 +976,48 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
             logging.info("Data append completed successfully")
             
         except Exception as append_error:
-            logging.warning(f"Append via item failed: {append_error}")
+            # Enhanced error diagnostics for large dataset failures
+            logging.error(f"Append via item failed: {append_error}")
             
-            # Fallback to batched edit_features method
-            logging.info("Falling back to batched feature edit method...")
+            # Provide specific troubleshooting guidance
+            error_str = str(append_error).lower()
+            if "504" in error_str or "timeout" in error_str:
+                logging.error("DIAGNOSIS: Network timeout during append operation")
+                logging.error("SOLUTION: The async append with job polling should prevent this")
+                logging.error("  - Check if use_async=True is being used for large datasets")
+                logging.error("  - Verify AGOL service supports async operations")
+            elif "append" in error_str and "not supported" in error_str:
+                logging.error("DIAGNOSIS: Feature layer does not support append operations")
+                logging.error("SOLUTION: Check service capabilities and settings:")
+                logging.error("  - hasStaticData must be False")
+                logging.error("  - capabilities must include 'Create,Update,Delete'")
+                logging.error("  - Service must be a hosted feature layer")
+            elif "schema" in error_str or "field" in error_str:
+                logging.error("DIAGNOSIS: Schema mismatch between source and target")
+                logging.error("SOLUTION: Verify field names and types match target service")
+            else:
+                logging.error("DIAGNOSIS: Unknown append failure")
+                logging.error("SOLUTION: Check AGOL service settings and network connectivity")
+            
+            # For large datasets, fail fast instead of degrading to slow batch processing
+            feature_count = len(prepared_gdf)
+            if feature_count > 10000:  # Large dataset threshold
+                logging.error(f"Refusing to fall back to batch processing for {feature_count:,} features")
+                logging.error("Batching would take too long.")
+                logging.error("Try to fix the append-via-item issue instead:")
+                logging.error("  1. Check service has hasStaticData=False")
+                logging.error("  2. Verify capabilities include 'Create,Update,Delete'")
+                logging.error("  3. Ensure network connectivity is stable")
+                logging.error("  4. Try again - transient AGOL issues are common")
+                raise RuntimeError(
+                    f"Append via item failed for large dataset ({feature_count:,} features). "
+                    f"Batch processing would take hours and often fails. "
+                    f"Fix the underlying issue: {append_error}"
+                )
+            
+            # Only allow fallback for smaller datasets where batch processing is reasonable
+            logging.warning(f"Falling back to batch processing for {feature_count:,} features")
+            logging.warning("This is slower but acceptable for datasets < 10K features")
             
             # Ensure proper geometry setup for ArcGIS spatial accessor
             prepared_gdf = prepared_gdf.set_geometry('geometry')
@@ -1775,6 +1792,31 @@ def _append_via_item(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS) -> bool:
         RuntimeError: If append operation fails
     """
     import time
+    
+    # Validate feature layer supports append operations
+    try:
+        layer_props = feature_layer.properties
+        supports_append = layer_props.get('supportsAppend', False)
+        has_static_data = layer_props.get('hasStaticData', True)
+        capabilities = layer_props.get('capabilities', '')
+        
+        if not supports_append:
+            logging.warning("Feature layer may not support append - checking service properties")
+        
+        if has_static_data:
+            logging.warning(
+                "Service has hasStaticData=True which may prevent efficient updates. "
+                "Consider setting hasStaticData=False for better performance."
+            )
+        
+        if 'Create' not in capabilities or 'Update' not in capabilities:
+            logging.warning(
+                f"Service capabilities '{capabilities}' may not support append operations. "
+                f"Ensure capabilities include 'Create,Update,Delete'"
+            )
+            
+    except Exception as props_error:
+        logging.debug(f"Could not check service properties: {props_error}")
     
     # Create temporary GeoJSON file
     tmp = _gdf_to_geojson_tempfile(gdf)
