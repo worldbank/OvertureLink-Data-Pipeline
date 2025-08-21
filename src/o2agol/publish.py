@@ -539,8 +539,8 @@ def _create_feature_service(
                 logging.error("Overwrite error on NEW service - likely staged item deletion timing issue")
                 logging.error("Staged item preserved for debugging - check AGOL interface")
             
-            # CRITICAL FIX: Do NOT delete staged GeoJSON item on publish failure
-            # This was causing cascade failures when AGOL couldn't find the source
+            # To not delete staged GeoJSON item on publish failure
+            # Previously was causing cascade failures when AGOL couldn't find the source
             logging.error(f"Service publish failed: {publish_error}")
             logging.info(f"Staged item preserved for debugging: {item.itemid}")
             logging.info("Manual cleanup required: delete the staged GeoJSON item from AGOL interface")
@@ -691,32 +691,14 @@ def _append_via_batches(
         RuntimeError: If batch append fails
     """
     total_features = len(gdf)
-    successful_adds = 0
     
-    logging.info(f"Starting batch append: {total_features:,} features in batches of {batch_size:,}")
+    logging.info(f"Starting append: {total_features:,} features")
     
-    # Try append-via-item first (more reliable for large datasets)
-    try:
-        append_success = _append_via_item(feature_layer, gdf, gis)
-        if append_success:
-            logging.info(f"Batch append completed via item method: {total_features:,} features")
-            return
-    except Exception as item_error:
-        logging.warning(f"Append via item failed: {item_error}")
-    
-    # Fallback to batched edit_features method
-    logging.info("Falling back to batched feature edit method...")
-    
-    # Ensure proper geometry setup for ArcGIS spatial accessor
-    prepared_gdf = gdf.set_geometry('geometry')
-    
-    for i in range(0, total_features, batch_size):
-        batch_gdf = prepared_gdf.iloc[i:i+batch_size]
-        batch_num = i // batch_size + 1
-        total_batches = (total_features + batch_size - 1) // batch_size
+    # Direct append via item - no fallback
+    append_success = _append_via_item(feature_layer, gdf, gis)
+    if not append_success:
+        raise RuntimeError("Append via item failed")
         
-        try:
-            feature_set = batch_gdf.spatial.to_featureset()
             edit_result = feature_layer.edit_features(adds=feature_set.features)
             
             add_results = edit_result.get('addResults', [])
@@ -1037,10 +1019,20 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
             successful_adds = 0
             
             for i in range(0, total_features, batch_size):
-                batch_gdf = prepared_gdf.iloc[i:i+batch_size]
+                batch_gdf = prepared_gdf.iloc[i:i+batch_size].copy()
+                
+                if 'geometry' not in batch_gdf.columns:
+                    raise ValueError(f"Batch {i//batch_size + 1}: No geometry column found")
+                
+                # Ensure geometry column is explicitly set for spatial accessor
+                batch_gdf = batch_gdf.set_geometry('geometry')
                 
                 try:
                     feature_set = batch_gdf.spatial.to_featureset()
+                    
+                    if not feature_set.features:
+                        raise ValueError(f"Batch conversion produced no features")
+                    
                     edit_result = feature_layer.edit_features(adds=feature_set.features)
                     
                     add_results = edit_result.get('addResults', [])
@@ -1657,10 +1649,6 @@ def _prepare_gdf_for_agol(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gp
     # Explicitly set geometry column for spatial accessor
     prepared_gdf = prepared_gdf.set_geometry('geometry')
     
-    # CRITICAL: Apply advanced geometry validation for building data
-    # This addresses the primary cause of "Unknown error" in AGOL publishing
-    if any(gt in ['Polygon', 'MultiPolygon'] for gt in prepared_gdf.geometry.geom_type.unique()):
-        prepared_gdf = validate_and_clean_geometries(prepared_gdf, layer_name)
     
     # Ensure CRS is WGS84
     if prepared_gdf.crs is None:
@@ -1810,29 +1798,112 @@ def _append_via_item(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS) -> bool:
         if not temp_item:
             raise RuntimeError("Failed to create temporary item for append operation")
         
-        # Analyze the uploaded item
-        logging.debug("Analyzing temporary item for publishing parameters")
-        analyzed = gis.content.analyze(item=temp_item.id, file_type='geojson')
+        # Skip analyze by default - user can enable with --analyze flag
+        feature_count = len(gdf)
+        use_analyze = False  # Will be set by CLI parameter
+        analyzed = {}
+        
+        if use_analyze:
+            try:
+                logging.debug("Analyzing temporary item for publishing parameters")
+                analyzed = gis.content.analyze(item=temp_item.id, file_type='geojson')
+            except Exception as analyze_error:
+                logging.warning(f"Analyze failed (non-critical): {analyze_error}")
+                analyzed = {}
+        else:
+            logging.debug("Skipping analyze step - use --analyze flag to enable")
+        
+        # Use sync by default - user can override with --async flag
+        use_async = False  # Will be set by CLI parameter
         
         # Perform append operation with correct parameters
-        append_result = feature_layer.append(
-            item_id=temp_item.id,
-            upload_format='geojson',
-            source_info=analyzed.get('publishParameters', {}),
-            upsert=False,
-            skip_updates=False,
-            use_globalids=False,
-            update_geometry=True,
-            rollback=True,
-            skip_inserts=False,
-            return_messages=True
-        )
+        append_params = {
+            'item_id': temp_item.id,
+            'source_table_name': 'features',  # Standard GeoJSON table name
+            'upload_format': 'geojson',
+            'source_info': analyzed.get('publishParameters', {}),
+            'upsert': False,
+            'use_global_ids': False,
+            'rollback': True,
+            'return_messages': True
+        }
         
-        if not append_result:
-            raise RuntimeError("Append operation returned no result")
+        if use_async:
+            # Use async append with job polling for large datasets
+            logging.info(f"Starting async append for {feature_count:,} features...")
+            append_result = feature_layer.append(**append_params, future=True)
             
-        logging.debug("Append operation completed successfully")
-        return True
+            if not append_result:
+                raise RuntimeError("Async append operation returned no result")
+            
+            # append_result is a Future object, not a dictionary
+            logging.info("Async append job submitted, waiting for completion...")
+            
+            # Poll the Future object for completion
+            import time
+            elapsed = 0
+            timeout = 1800  # 30 minutes
+            poll_interval = 10  # 10 seconds
+            
+            while elapsed < timeout:
+                try:
+                    if append_result.done():
+                        # Get the actual result
+                        try:
+                            result = append_result.result()
+                            logging.info(f"Async append completed successfully in {elapsed}s")
+                            logging.info(f"Append result: {result}")
+                            return True
+                        except Exception as e:
+                            # Get detailed exception information
+                            exception = append_result.exception()
+                            logging.error(f"Async append exception details: {e}")
+                            logging.error(f"Future exception: {exception}")
+                            
+                            # Try to get more details from the result if possible
+                            try:
+                                result = append_result.result(timeout=1)
+                                logging.error(f"Result details: {result}")
+                            except Exception as result_error:
+                                logging.error(f"Could not get result details: {result_error}")
+                            
+                            raise RuntimeError(f"Async append failed: {exception or e}")
+                    
+                    # Log progress every 30 seconds
+                    if elapsed % 30 == 0 and elapsed > 0:
+                        logging.info(f"Async append still running ({elapsed}s elapsed)")
+                    
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                        
+                except Exception as e:
+                    if "Async append failed:" in str(e):
+                        raise  # Re-raise our own exception
+                    logging.warning(f"Error checking future status: {e}")
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+            
+            # Timeout
+            raise RuntimeError(
+                f"Async append timed out after {timeout}s. "
+                f"Job may still be running - check AGOL for completion."
+            )
+        else:
+            # Use synchronous append for small datasets
+            logging.debug(f"Starting sync append for {feature_count} features...")
+            append_result = feature_layer.append(**append_params)
+            
+            if not append_result:
+                raise RuntimeError("Sync append operation returned no result")
+                
+            # Check for success in synchronous result
+            success = append_result.get('success', True)  # Default to True for backward compatibility
+            if not success:
+                error_msg = append_result.get('error', {}).get('message', 'Unknown sync append error')
+                raise RuntimeError(f"Sync append failed: {error_msg}")
+            
+            logging.debug("Sync append operation completed successfully")
+            return True
         
     except Exception as e:
         logging.error(f"Failed to append data via item: {e}")
