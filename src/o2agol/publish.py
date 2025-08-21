@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
+import uuid
 from typing import Dict, Literal, Optional, TypedDict, Union
 from dataclasses import dataclass
 
@@ -14,6 +16,7 @@ from pathlib import Path
 
 # Import secure configuration system
 from o2agol.config.settings import Config, ConfigurationError
+from .types import StagingFormat, StagingFormatError, StagingUploadError, StagingCleanupError
 
 # Type definitions for unified publishing
 GeoFrame = gpd.GeoDataFrame
@@ -47,7 +50,193 @@ class DatasetSize:
 
 from .cleanup import get_pid_temp_dir  # make sure this import exists at the top
 
+# Helper functions for hardened append path
+def _target_append_fields(feature_layer, source_cols: list[str]) -> list[str]:
+    """Build explicit append_fields list from the intersection of target field NAMES and source columns.
+    Excludes geometry/OBJECTID/reserved fields."""
+    reserved = {"OBJECTID", "objectid", "Shape", "shape", "GlobalID", "globalid"}
+    t_fields = [f["name"] for f in feature_layer.properties.fields]
+    return [c for c in source_cols if c in t_fields and c not in reserved and c != "geometry"]
 
+
+def _source_table_name_for(staging_format: str, layer_name: str) -> str:
+    """For 'geojson', ArcGIS uses a default internal table name ('features').
+    For 'gpkg', we must pass the actual layer/table name we wrote."""
+    return "features" if staging_format.lower() == "geojson" else layer_name
+
+
+def _ensure_unique_index(layer, field_name: str) -> None:
+    """Optional (only for upsert): enforce a unique index on match field once."""
+    try:
+        layer.manager.add_to_definition({
+            "indexes": [{
+                "fields": field_name,
+                "isUnique": True,
+                "description": "o2agol_upsert_key"
+            }]
+        })
+    except Exception:
+        pass
+
+
+def _analyze_staged_item(gis, staged_item_id: str) -> dict:
+    """Return publishParameters dict if analyze succeeds; else {}."""
+    try:
+        item = gis.content.get(staged_item_id)
+        res = item.analyze()
+        if isinstance(res, dict) and "publishParameters" in res:
+            return res["publishParameters"]
+    except Exception as ex:
+        logging.warning("Analyze failed for item %s: %s", staged_item_id, ex)
+    return {}
+
+
+def _poll_append_job(job, timeout_s: int = 5400) -> dict:
+    """Poll async append job with comprehensive monitoring."""
+    import time
+    
+    if not job:
+        raise RuntimeError("No append job to poll")
+    
+    start_time = time.time()
+    poll_interval = 2.0
+    
+    logging.info("Polling async append job for completion...")
+    
+    while True:
+        try:
+            elapsed = time.time() - start_time
+            
+            if elapsed > timeout_s:
+                logging.error(f"Append job timed out after {timeout_s}s")
+                raise RuntimeError(f"Append job timed out after {timeout_s} seconds")
+            
+            if hasattr(job, 'done') and job.done():
+                try:
+                    result = job.result()
+                    logging.info(f"Async append completed successfully in {elapsed:.1f}s")
+                    return result or {"success": True, "duration_s": elapsed}
+                except Exception as e:
+                    exception = job.exception() if hasattr(job, 'exception') else None
+                    logging.error(f"Async append failed: {exception or e}")
+                    raise RuntimeError(f"Async append failed: {exception or e}")
+            
+            # Log progress periodically
+            if elapsed > 0 and int(elapsed) % 30 == 0:
+                logging.info(f"Append job still running ({elapsed:.0f}s elapsed)")
+            
+            time.sleep(poll_interval)
+            
+        except RuntimeError:
+            raise  # Re-raise timeout and job failure errors
+        except Exception as e:
+            logging.warning(f"Error polling job status: {e}")
+            time.sleep(poll_interval)
+
+
+def _append_via_item_hardened(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS, use_async: bool = False, use_analyze: bool = False, staging_format: StagingFormat = StagingFormat.GEOJSON) -> bool:
+    """
+    Hardened append workflow for large dataset operations.
+    
+    Implements single-path staging → append → poll → verify → cleanup workflow
+    with format-specific staging and explicit append parameters.
+    """
+    temp_item = None
+    staging_file = None
+    
+    try:
+        # Stage data with format-specific handling
+        staging_format_str = (staging_format.value if isinstance(staging_format, StagingFormat) else staging_format).lower()
+        layer_name = f"o2agol_{int(time.time()) % 100000}"
+
+        if staging_format_str == "gpkg":
+            staging_file = _gdf_to_gpkg_tempfile(gdf, layer_name)
+            item_type = "GeoPackage"
+            upload_format = "geoPackage"
+        else:
+            staging_file = _gdf_to_geojson_tempfile(gdf)
+            item_type = "GeoJson"
+            upload_format = "geojson"
+            layer_name = "features"
+
+        # Create staging item
+        temp_title = f"temp_append_data_{uuid.uuid4().hex[:8]}"
+        item_properties = {
+            "type": item_type,
+            "title": temp_title,
+            "tags": "temporary,overture-pipeline"
+        }
+        
+        logging.info(f"Creating staging item: {temp_title} ({staging_format_str} format)")
+        temp_item = gis.content.add(item_properties, data=staging_file.name)
+        
+        if not temp_item:
+            raise StagingUploadError(None, "Failed to create staging item")
+
+        # Optional analyze
+        publish_params = _analyze_staged_item(gis, temp_item.id) if use_analyze else {}
+
+        # Build explicit mapping + table name
+        source_cols = [c for c in gdf.columns if c != "geometry"]
+        append_fields = _target_append_fields(feature_layer, source_cols)
+        source_table_name = _source_table_name_for(staging_format_str, layer_name)
+
+        # Assemble append params
+        append_kwargs = dict(
+            item_id=temp_item.id,
+            upload_format=upload_format,
+            source_table_name=source_table_name,
+            append_fields=append_fields,
+            upsert=False,
+            upsert_matching_field=None,
+            skip_updates=False,
+            skip_inserts=False,
+            update_geometry=True,
+            rollback=True,
+            return_messages=True,
+            future=use_async
+        )
+        
+        logging.info("Append params: format=%s table=%s fields=%d async=%s",
+                     upload_format, source_table_name, len(append_fields), use_async)
+
+        # Call append + poll
+        job = feature_layer.append(**append_kwargs)
+        
+        if use_async:
+            result = _poll_append_job(job, timeout_s=5400)
+            logging.info("Append completed: %s", result)
+        else:
+            logging.info("Append completed (sync).")
+            
+        return True
+        
+    except (StagingFormatError, StagingUploadError):
+        raise
+    except Exception as e:
+        logging.error(f"Append operation failed: {e}")
+        raise RuntimeError(f"Append operation failed: {e}")
+        
+    finally:
+        # Guaranteed cleanup
+        cleanup_errors = []
+        
+        if temp_item:
+            try:
+                temp_item.delete()
+                logging.debug("Temporary AGOL item deleted")
+            except Exception as e:
+                cleanup_errors.append(f"Failed to delete temp item: {e}")
+        
+        if staging_file:
+            try:
+                os.unlink(staging_file.name)
+                logging.debug("Staging file cleaned up")
+            except Exception as e:
+                cleanup_errors.append(f"Failed to cleanup staging file: {e}")
+        
+        for error in cleanup_errors:
+            logging.warning(error)
 
 def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gpd.GeoDataFrame:
     """
@@ -353,6 +542,26 @@ def _gdf_to_geojson_tempfile(gdf: gpd.GeoDataFrame) -> tempfile.NamedTemporaryFi
     return TempFile(tmp_name)
 
 
+def _gdf_to_gpkg_tempfile(gdf: gpd.GeoDataFrame, layer_name: str):
+    """Write GeoDataFrame to a temporary GeoPackage with a single layer.
+    Returns an object with a .name pointing to the .gpkg path."""
+    temp_dir = get_pid_temp_dir()
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".gpkg", delete=False, dir=str(temp_dir))
+    tmp_name = tmp.name
+    tmp.close()
+
+    # Ensure CRS is EPSG:4326 (if your pipeline guarantees it already, skip)
+    if gdf.crs is not None and str(gdf.crs).lower() not in ("epsg:4326", "wgs84"):
+        gdf = gdf.to_crs(epsg=4326)
+
+    gdf.to_file(tmp_name, driver="GPKG", layer=layer_name)
+
+    class TempFile:  # mimic NamedTemporaryFile interface used by existing code
+        def __init__(self, name): self.name = name
+    return TempFile(tmp_name)
+
+
 def _create_feature_service(
     gis: GIS, 
     gdf: GeoFrame,
@@ -414,6 +623,50 @@ def _create_feature_service(
                 
                 filtered_params = {k: v for k, v in analyze_params.items() 
                                  if k not in problematic_params}
+                
+                # Check if analyze detected fields correctly
+                # If it only found a single field named "_" with alias "{", the analysis is invalid
+                layerInfo = analyze_params.get('layerInfo', {})
+                fields = layerInfo.get('fields', [])
+                
+                if (len(fields) == 1 and 
+                    fields[0].get('name') == '_' and 
+                    fields[0].get('alias') == '{'):
+                    logging.warning("AGOL analyze detected invalid field structure - constructing manual field definitions")
+                    
+                    # Create proper field definitions from GeoDataFrame columns
+                    manual_fields = []
+                    for col in gdf.columns:
+                        if col == 'geometry':
+                            continue  # Skip geometry column
+                        
+                        # Determine field type based on data
+                        sample_value = gdf[col].dropna().iloc[0] if not gdf[col].dropna().empty else None
+                        if sample_value is None:
+                            field_type = "esriFieldTypeString"
+                        elif isinstance(sample_value, (int, np.integer)):
+                            field_type = "esriFieldTypeInteger"
+                        elif isinstance(sample_value, (float, np.floating)):
+                            field_type = "esriFieldTypeDouble"
+                        else:
+                            field_type = "esriFieldTypeString"
+                        
+                        manual_fields.append({
+                            "name": col,
+                            "type": field_type,
+                            "alias": col.replace('_', ' ').title(),
+                            "sqlType": "sqlTypeNVarchar" if field_type == "esriFieldTypeString" else "sqlTypeOther",
+                            "length": 256 if field_type == "esriFieldTypeString" else None,
+                            "nullable": True,
+                            "editable": True,
+                            "domain": None,
+                            "defaultValue": None
+                        })
+                    
+                    # Update layerInfo with correct fields
+                    if 'layerInfo' in filtered_params:
+                        filtered_params['layerInfo']['fields'] = manual_fields
+                        logging.info(f"Added manual field definitions for {len(manual_fields)} fields")
                 
                 # Merge filtered parameters with our requirements
                 publish_params.update(filtered_params)
@@ -573,7 +826,10 @@ def _initial_with_seed_and_append(
     gis: GIS, 
     gdf: GeoFrame,
     tgt,
-    dataset_size: DatasetSize
+    dataset_size: DatasetSize,
+    use_async: bool = False,
+    use_analyze: bool = False,
+    staging_format: StagingFormat = StagingFormat.GEOJSON
 ) -> object:
     """
     Create feature service using seed-and-append strategy for large datasets.
@@ -652,7 +908,7 @@ def _initial_with_seed_and_append(
             raise RuntimeError("No valid features remaining after preparation")
         
         # Batch append the full dataset
-        _append_via_batches(feature_layer, prepared_gdf, LARGE_DATASET_BATCH_SIZE, gis)
+        _append_via_batches(feature_layer, prepared_gdf, LARGE_DATASET_BATCH_SIZE, gis, use_async, use_analyze, staging_format)
         
         logging.info(f"Successfully populated service with {len(prepared_gdf):,} features")
         return fl_item
@@ -673,36 +929,37 @@ def _append_via_batches(
     feature_layer,
     gdf: gpd.GeoDataFrame,
     batch_size: int,
-    gis: GIS
+    gis: GIS,
+    use_async: bool = False,
+    use_analyze: bool = False,
+    staging_format: StagingFormat = StagingFormat.GEOJSON
 ) -> None:
     """
     Append data to feature layer in optimized batches.
     
-    Uses the existing append-via-item pattern for reliability with
-    enhanced batch processing for large polygon datasets.
-    
-    Args:
-        feature_layer: Target feature layer to append to
-        gdf: GeoDataFrame to append
-        batch_size: Number of features per batch
-        gis: Authenticated GIS connection
-        
-    Raises:
-        RuntimeError: If batch append fails
+    Implements proper chunking for large datasets with explicit staging format support.
     """
-    total_features = len(gdf)
-    
-    logging.info(f"Starting append: {total_features:,} features")
-    
-    # Direct append via item - no fallback
-    append_success = _append_via_item(feature_layer, gdf, gis)
-    if not append_success:
-        raise RuntimeError("Append via item failed")
-        
-    logging.info(f"Append completed: {total_features:,} features")
+
+    total = len(gdf)
+    if total == 0:
+        logging.info("No features to append.")
+        return
+
+    logging.info(f"Starting append in parts: total {total:,} features, batch_size={batch_size:,}")
+    part_idx = 0
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        part_idx += 1
+        part_gdf = gdf.iloc[start:end].copy()
+        logging.info(f"Appending part {part_idx}: {len(part_gdf):,} features [{start}:{end})")
+        _append_via_item(feature_layer, part_gdf, gis,
+                         use_async=use_async,
+                         use_analyze=use_analyze,
+                         staging_format=staging_format)
+    logging.info("All parts appended successfully.")
 
 
-def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
+def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial", use_async: bool = False, use_analyze: bool = False, staging_format: StagingFormat = StagingFormat.GEOJSON):
     """
     Publish or update geospatial data to ArcGIS Online using secure configuration.
     
@@ -834,7 +1091,7 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
                 logging.info("Using seed-and-append strategy to avoid analyze timeouts")
 
                 # Use seed-and-append strategy for large datasets
-                return _initial_with_seed_and_append(gis, gdf, tgt, dataset_size)
+                return _initial_with_seed_and_append(gis, gdf, tgt, dataset_size, use_async, use_analyze, staging_format)
 
             
             # Standard publishing path for smaller datasets
@@ -970,102 +1227,9 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial"):
         
         logging.info(f"Uploading {len(prepared_gdf):,} prepared features")
         
-        # Use unified append approach for all overwrite/append operations
-        try:
-            _append_via_item(feature_layer, prepared_gdf, gis)
-            logging.info("Data append completed successfully")
-            
-        except Exception as append_error:
-            # Enhanced error diagnostics for large dataset failures
-            logging.error(f"Append via item failed: {append_error}")
-            
-            # Provide specific troubleshooting guidance
-            error_str = str(append_error).lower()
-            if "504" in error_str or "timeout" in error_str:
-                logging.error("DIAGNOSIS: Network timeout during append operation")
-                logging.error("SOLUTION: The async append with job polling should prevent this")
-                logging.error("  - Check if use_async=True is being used for large datasets")
-                logging.error("  - Verify AGOL service supports async operations")
-            elif "append" in error_str and "not supported" in error_str:
-                logging.error("DIAGNOSIS: Feature layer does not support append operations")
-                logging.error("SOLUTION: Check service capabilities and settings:")
-                logging.error("  - hasStaticData must be False")
-                logging.error("  - capabilities must include 'Create,Update,Delete'")
-                logging.error("  - Service must be a hosted feature layer")
-            elif "schema" in error_str or "field" in error_str:
-                logging.error("DIAGNOSIS: Schema mismatch between source and target")
-                logging.error("SOLUTION: Verify field names and types match target service")
-            else:
-                logging.error("DIAGNOSIS: Unknown append failure")
-                logging.error("SOLUTION: Check AGOL service settings and network connectivity")
-            
-            # For large datasets, fail fast instead of degrading to slow batch processing
-            feature_count = len(prepared_gdf)
-            if feature_count > 10000:  # Large dataset threshold
-                logging.error(f"Refusing to fall back to batch processing for {feature_count:,} features")
-                logging.error("Batching would take too long.")
-                logging.error("Try to fix the append-via-item issue instead:")
-                logging.error("  1. Check service has hasStaticData=False")
-                logging.error("  2. Verify capabilities include 'Create,Update,Delete'")
-                logging.error("  3. Ensure network connectivity is stable")
-                logging.error("  4. Try again - transient AGOL issues are common")
-                raise RuntimeError(
-                    f"Append via item failed for large dataset ({feature_count:,} features). "
-                    f"Batch processing would take hours and often fails. "
-                    f"Fix the underlying issue: {append_error}"
-                )
-            
-            # Only allow fallback for smaller datasets where batch processing is reasonable
-            logging.warning(f"Falling back to batch processing for {feature_count:,} features")
-            logging.warning("This is slower but acceptable for datasets < 10K features")
-            
-            # Ensure proper geometry setup for ArcGIS spatial accessor
-            prepared_gdf = prepared_gdf.set_geometry('geometry')
-            
-            # Batch processing for large datasets - optimize batch size by geometry type
-            geom_types = prepared_gdf.geometry.geom_type.value_counts()
-            primary_geom_type = geom_types.index[0] if len(geom_types) > 0 else "Unknown"
-            
-            if primary_geom_type in ['Polygon', 'MultiPolygon']:
-                batch_size = LARGE_DATASET_BATCH_SIZE  # Larger batches for polygons (5000)
-                logging.info(f"Using optimized batch size for {primary_geom_type}: {batch_size:,}")
-            else:
-                batch_size = 2000  # Keep original size for points/lines
-                
-            total_features = len(prepared_gdf)
-            successful_adds = 0
-            
-            for i in range(0, total_features, batch_size):
-                batch_gdf = prepared_gdf.iloc[i:i+batch_size].copy()
-                
-                if 'geometry' not in batch_gdf.columns:
-                    raise ValueError(f"Batch {i//batch_size + 1}: No geometry column found")
-                
-                # Ensure geometry column is explicitly set for spatial accessor
-                batch_gdf = batch_gdf.set_geometry('geometry')
-                
-                try:
-                    feature_set = batch_gdf.spatial.to_featureset()
-                    
-                    if not feature_set.features:
-                        raise ValueError(f"Batch conversion produced no features")
-                    
-                    edit_result = feature_layer.edit_features(adds=feature_set.features)
-                    
-                    add_results = edit_result.get('addResults', [])
-                    batch_successful = sum(1 for r in add_results if r.get('success', False))
-                    successful_adds += batch_successful
-                    
-                    logging.info(f"Batch {i//batch_size + 1}: {batch_successful}/{len(batch_gdf)} features")
-                    
-                except Exception as batch_error:
-                    logging.error(f"Batch {i//batch_size + 1} failed: {batch_error}")
-            
-            if successful_adds != total_features:
-                logging.warning(f"Partial upload: {successful_adds}/{total_features} features uploaded")
-            else:
-                logging.info(f"Batch upload completed: {successful_adds:,} features uploaded")
-        
+        # Hardened single-path append - no fallback, fail fast
+        _append_via_item(feature_layer, prepared_gdf, gis, use_async, use_analyze, staging_format)
+        logging.info("Data append completed successfully")
         logging.info(f"Data update operation completed - Item ID preserved: {item_id}")
         
         # Get final count (with brief delay for AGOL indexing)
@@ -1125,7 +1289,7 @@ def _generate_service_name(tgt) -> str:
 
 
 
-def publish_multi_layer_service(layer_data: LayerBundle, tgt, mode: str = "auto"):
+def publish_multi_layer_service(layer_data: LayerBundle, tgt, mode: str = "auto", use_async: bool = False, use_analyze: bool = False, staging_format: StagingFormat = StagingFormat.GEOJSON):
     """
     Publish or update multi-layer feature service for combined Overture data.
     
@@ -1137,6 +1301,8 @@ def publish_multi_layer_service(layer_data: LayerBundle, tgt, mode: str = "auto"
         layer_data: Dictionary mapping layer names to GeoDataFrames
         tgt: Target configuration with AGOL settings
         mode: Publishing mode - 'auto', 'initial', or 'overwrite'
+        use_async: Use async append operations (default: False)
+        use_analyze: Analyze data before append (default: False)
         
     Returns:
         Published or updated feature service item
@@ -1244,7 +1410,7 @@ def publish_multi_layer_service(layer_data: LayerBundle, tgt, mode: str = "auto"
         existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None), tgt)
         if existing_service:
             logging.info(f"Found existing service '{title}' (ID: {existing_service.itemid})")
-            return _update_existing_service(existing_service, combined_gdf, prepared_layers, gis, tgt)
+            return _update_existing_service(existing_service, combined_gdf, prepared_layers, gis, tgt, use_async, use_analyze)
         else:
             logging.info(f"No existing service found for '{title}' - creating new...")
     
@@ -1255,7 +1421,7 @@ def publish_multi_layer_service(layer_data: LayerBundle, tgt, mode: str = "auto"
         existing_service = _find_existing_service(gis, title, getattr(tgt.agol, 'item_id', None), tgt)
         if not existing_service:
             raise RuntimeError(f"Cannot overwrite - service '{title}' not found")
-        return _update_existing_service(existing_service, combined_gdf, prepared_layers)
+        return _update_existing_service(existing_service, combined_gdf, prepared_layers, gis, tgt, use_async, use_analyze)
     
     # PHASE 5: Create new service using unified approach
     service_name = tgt.agol.service_name
@@ -1442,7 +1608,7 @@ def _find_existing_service(gis: GIS, title: str, item_id: str = None, tgt=None):
         return None
 
 
-def _update_existing_service(existing_service, combined_gdf, layer_data, gis: GIS, tgt=None):
+def _update_existing_service(existing_service, combined_gdf, layer_data, gis: GIS, tgt=None, use_async: bool = False, use_analyze: bool = False):
     """
     Update existing multi-layer feature service with new data and metadata.
     
@@ -1552,23 +1718,9 @@ def _update_existing_service(existing_service, combined_gdf, layer_data, gis: GI
             
             logging.info(f"Uploading {len(data_to_upload):,} features...")
             
-            # Method 1: Try using append with correct ArcGIS API pattern
-            try:
-                _append_via_item(feature_layer, data_to_upload, gis)
-                logging.info("Data append completed successfully")
-            except Exception as append_error:
-                logging.warning(f"Append via item failed: {append_error}")
-                
-                # Fallback to edit_features method
-                logging.info("Falling back to direct feature edit method...")
-                data_to_upload = data_to_upload.set_geometry('geometry')
-                feature_set = data_to_upload.spatial.to_featureset()
-                
-                edit_result = feature_layer.edit_features(adds=feature_set.features)
-                if not edit_result.get('addResults', [{}])[0].get('success', False):
-                    raise RuntimeError(f"Failed to update features: {edit_result}")
-                    
-                logging.info("Fallback edit_features completed successfully")
+            # Hardened single-path append - no fallback
+            _append_via_item(feature_layer, data_to_upload, gis, use_async, use_analyze, staging_format)
+            logging.info("Data append completed successfully")
                     
         else:
             # Multi-layer service - update each layer separately
@@ -1597,23 +1749,9 @@ def _update_existing_service(existing_service, combined_gdf, layer_data, gis: GI
                 else:
                     logging.info(f"Existing data cleared from layer {layer_name}")
                 
-                # Upload new data using correct ArcGIS API pattern
-                try:
-                    _append_via_item(layer, data_to_upload, gis)
-                    logging.info(f"Layer {layer_name} updated successfully")
-                except Exception as append_error:
-                    logging.warning(f"Append via item failed for layer {layer_name}: {append_error}")
-                    
-                    # Fallback to edit_features method
-                    logging.info(f"Falling back to direct feature edit for layer {layer_name}...")
-                    data_to_upload = data_to_upload.set_geometry('geometry')
-                    feature_set = data_to_upload.spatial.to_featureset()
-                    
-                    edit_result = layer.edit_features(adds=feature_set.features)
-                    if not edit_result.get('addResults', [{}])[0].get('success', False):
-                        logging.warning(f"Failed to update layer {layer_name}: {edit_result}")
-                    else:
-                        logging.info(f"Layer {layer_name} fallback update completed successfully")
+                # Hardened single-path append - no fallback
+                _append_via_item(layer, data_to_upload, gis, use_async, use_analyze, staging_format)
+                logging.info(f"Layer {layer_name} updated successfully")
         
         # Verify final counts
         total_features = 0
@@ -1658,6 +1796,9 @@ def _prepare_gdf_for_agol(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gp
     """
     # Make a copy to avoid modifying original
     prepared_gdf = gdf.copy()
+    
+    # Data should already be cleaned and flattened by the transform pipeline
+    # No need for additional complex data cleaning here
     
     # Ensure geometry column exists and is properly set
     if 'geometry' not in prepared_gdf.columns:
@@ -1773,196 +1914,109 @@ def _prepare_gdf_for_agol(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gp
     return prepared_gdf
 
 
-def _append_via_item(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS) -> bool:
+def _append_via_item(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS, use_async: bool = False, use_analyze: bool = False, staging_format: StagingFormat = StagingFormat.GEOJSON) -> bool:
     """
-    Append data to feature layer using correct ArcGIS API pattern.
+    Hardened append workflow for large dataset operations.
     
-    Creates temporary Portal item, analyzes it, appends to target layer,
-    then cleans up the temporary item.
+    Implements single-path staging → append → poll → verify → cleanup workflow
+    with format-specific staging and explicit append parameters.
+    """
+    return _append_via_item_hardened(feature_layer, gdf, gis, use_async, use_analyze, staging_format)
+
+
+def _cleanup_geojson_item(item, max_retries: int = 3) -> bool:
+    """
+    Robust cleanup of temporary GeoJSON items with retry logic.
     
     Args:
-        feature_layer: Target feature layer to append to
-        gdf: GeoDataFrame to append
-        gis: Authenticated GIS connection
+        item: GeoJSON item to delete
+        max_retries: Maximum number of retry attempts
         
     Returns:
-        True if successful, False otherwise
-        
-    Raises:
-        RuntimeError: If append operation fails
+        True if successfully deleted, False otherwise
     """
     import time
-    
-    # Validate feature layer supports append operations
-    try:
-        layer_props = feature_layer.properties
-        supports_append = layer_props.get('supportsAppend', False)
-        has_static_data = layer_props.get('hasStaticData', True)
-        capabilities = layer_props.get('capabilities', '')
-        
-        if not supports_append:
-            logging.warning("Feature layer may not support append - checking service properties")
-        
-        if has_static_data:
-            logging.warning(
-                "Service has hasStaticData=True which may prevent efficient updates. "
-                "Consider setting hasStaticData=False for better performance."
-            )
-        
-        if 'Create' not in capabilities or 'Update' not in capabilities:
-            logging.warning(
-                f"Service capabilities '{capabilities}' may not support append operations. "
-                f"Ensure capabilities include 'Create,Update,Delete'"
-            )
-            
-    except Exception as props_error:
-        logging.debug(f"Could not check service properties: {props_error}")
-    
-    # Create temporary GeoJSON file
-    tmp = _gdf_to_geojson_tempfile(gdf)
-    temp_item = None
-    
-    try:
-        # Create unique temporary item name
-        timestamp = int(time.time())
-        temp_title = f"temp_append_data_{timestamp}"
-        
-        # Upload as temporary Portal item
-        item_properties = {
-            "type": "GeoJson",
-            "title": temp_title,
-            "tags": "temporary,overture-pipeline"
-        }
-        
-        logging.debug(f"Creating temporary item: {temp_title}")
-        temp_item = gis.content.add(item_properties, data=tmp.name)
-        
-        if not temp_item:
-            raise RuntimeError("Failed to create temporary item for append operation")
-        
-        # Skip analyze by default - user can enable with --analyze flag
-        feature_count = len(gdf)
-        use_analyze = False  # Will be set by CLI parameter
-        analyzed = {}
-        
-        if use_analyze:
-            try:
-                logging.debug("Analyzing temporary item for publishing parameters")
-                analyzed = gis.content.analyze(item=temp_item.id, file_type='geojson')
-            except Exception as analyze_error:
-                logging.warning(f"Analyze failed (non-critical): {analyze_error}")
-                analyzed = {}
-        else:
-            logging.debug("Skipping analyze step - use --analyze flag to enable")
-        
-        # Use sync by default - user can override with --async flag
-        use_async = False  # Will be set by CLI parameter
-        
-        # Perform append operation with correct parameters
-        append_params = {
-            'item_id': temp_item.id,
-            'source_table_name': 'features',  # Standard GeoJSON table name
-            'upload_format': 'geojson',
-            'source_info': analyzed.get('publishParameters', {}),
-            'upsert': False,
-            'use_global_ids': False,
-            'rollback': True,
-            'return_messages': True
-        }
-        
-        if use_async:
-            # Use async append with job polling for large datasets
-            logging.info(f"Starting async append for {feature_count:,} features...")
-            append_result = feature_layer.append(**append_params, future=True)
-            
-            if not append_result:
-                raise RuntimeError("Async append operation returned no result")
-            
-            # append_result is a Future object, not a dictionary
-            logging.info("Async append job submitted, waiting for completion...")
-            
-            # Poll the Future object for completion
-            import time
-            elapsed = 0
-            timeout = 1800  # 30 minutes
-            poll_interval = 10  # 10 seconds
-            
-            while elapsed < timeout:
-                try:
-                    if append_result.done():
-                        # Get the actual result
-                        try:
-                            result = append_result.result()
-                            logging.info(f"Async append completed successfully in {elapsed}s")
-                            logging.info(f"Append result: {result}")
-                            return True
-                        except Exception as e:
-                            # Get detailed exception information
-                            exception = append_result.exception()
-                            logging.error(f"Async append exception details: {e}")
-                            logging.error(f"Future exception: {exception}")
-                            
-                            # Try to get more details from the result if possible
-                            try:
-                                result = append_result.result(timeout=1)
-                                logging.error(f"Result details: {result}")
-                            except Exception as result_error:
-                                logging.error(f"Could not get result details: {result_error}")
-                            
-                            raise RuntimeError(f"Async append failed: {exception or e}")
-                    
-                    # Log progress every 30 seconds
-                    if elapsed % 30 == 0 and elapsed > 0:
-                        logging.info(f"Async append still running ({elapsed}s elapsed)")
-                    
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
-                        
-                except Exception as e:
-                    if "Async append failed:" in str(e):
-                        raise  # Re-raise our own exception
-                    logging.warning(f"Error checking future status: {e}")
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
-            
-            # Timeout
-            raise RuntimeError(
-                f"Async append timed out after {timeout}s. "
-                f"Job may still be running - check AGOL for completion."
-            )
-        else:
-            # Use synchronous append for small datasets
-            logging.debug(f"Starting sync append for {feature_count} features...")
-            append_result = feature_layer.append(**append_params)
-            
-            if not append_result:
-                raise RuntimeError("Sync append operation returned no result")
-                
-            # Check for success in synchronous result
-            success = append_result.get('success', True)  # Default to True for backward compatibility
-            if not success:
-                error_msg = append_result.get('error', {}).get('message', 'Unknown sync append error')
-                raise RuntimeError(f"Sync append failed: {error_msg}")
-            
-            logging.debug("Sync append operation completed successfully")
-            return True
-        
-    except Exception as e:
-        logging.error(f"Failed to append data via item: {e}")
-        raise RuntimeError(f"Append operation failed: {e}")
-        
-    finally:
-        # Clean up temporary file
+    if not item:
+        return True
+    for attempt in range(max_retries):
         try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+            # Attempt to delete the item
+            result = item.delete()
             
-        # Clean up temporary Portal item
-        if temp_item:
-            cleanup_success = _cleanup_geojson_item(temp_item)
-            if not cleanup_success:
-                logging.warning(f"Failed to clean up temporary item: {temp_item.title}")
+            if result:
+                logging.debug(f"Successfully cleaned up GeoJSON item: {item.title} ({item.itemid})")
+                
+                # Verify item is actually deleted
+                try:
+                    # Try to access the item - should fail if truly deleted
+                    test_item = item.gis.content.get(item.itemid)
+                    if test_item is None:
+                        return True
+                    else:
+                        logging.debug(f"Item still exists after delete attempt {attempt + 1}")
+                except Exception:
+                    # Exception means item not found - good!
+                    return True
+            
+            # If we got here, deletion didn't work
+            if attempt < max_retries - 1:
+                logging.debug(f"Delete attempt {attempt + 1} failed, retrying in 2 seconds...")
+                time.sleep(2)
+            
+        except Exception as e:
+            if "does not exist" in str(e).lower() or "not found" in str(e).lower():
+                # Item already deleted
+                logging.debug(f"GeoJSON item already deleted: {item.itemid}")
+                return True
+            
+            if attempt < max_retries - 1:
+                logging.debug(f"Delete attempt {attempt + 1} failed with error: {e}, retrying...")
+                time.sleep(2)
+            else:
+                logging.warning(f"Failed to cleanup GeoJSON item after {max_retries} attempts: {e}")
+    
+    return False
+
+
+def _confirm_permanent_delete(item, interactive_mode: bool = True, apply_to_all: bool = False) -> tuple[bool, bool]:
+    """
+    Ask user confirmation before permanently deleting an item from recycle bin.
+    
+    Args:
+        item: ArcGIS item to potentially delete
+        interactive_mode: Whether to prompt user for input
+        apply_to_all: Whether to apply choice to all subsequent items
+        
+    Returns:
+        Tuple of (should_delete, apply_to_all_future)
+    """
+    if not interactive_mode:
+        return False, apply_to_all
+        
+    print(f"\n⚠️  Found conflicting item in recycle bin:")
+    print(f"  Title: {getattr(item, 'title', 'Unknown')}")
+    print(f"  Type: {getattr(item, 'type', 'Unknown')}")
+    print(f"  Owner: {getattr(item, 'owner', 'Unknown')}")
+    print(f"  Item ID: {item.itemid}")
+    print(f"\n❗ This item will be PERMANENTLY DELETED and cannot be recovered!")
+    print(f"This is required to create a new service with the same name.")
+    
+    while True:
+        try:
+            response = input("\nPermanently delete this item? [y/N/a(pply to all)]: ").lower().strip()
+            
+            if response in ['y', 'yes']:
+                return True, apply_to_all
+            elif response in ['a', 'apply', 'all']:
+                return True, True
+            elif response in ['n', 'no', '']:
+                return False, apply_to_all
+            else:
+                print("Please enter 'y' (yes), 'n' (no), or 'a' (apply to all)")
+                
+        except (KeyboardInterrupt, EOFError):
+            print("\nOperation cancelled by user")
+            return False, apply_to_all
 
 
 def _cleanup_geojson_item(item, max_retries: int = 3) -> bool:

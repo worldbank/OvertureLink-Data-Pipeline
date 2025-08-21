@@ -44,5 +44,4 @@ overturedump/
 dev/
 tests/
 src/o2agol/debug.py
-
-run_country.py
+docs/
