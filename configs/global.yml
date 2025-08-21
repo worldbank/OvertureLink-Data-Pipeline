@@ -47,8 +47,9 @@ templates:
     World Bank processing and value‑added metadata© International Bank for Reconstruction and Development / The World Bank.<br>
     "
   access_information: "{attribution}"
+  attribution: "Acknowledgements: This data processing and pipeline development was supported by {organization}. Original data © Overture Maps Foundation and contributors."
   # Base tags template: ISO3 + sector + source + year + organization tags
-  tags_base: ["{iso3}", "overture maps", "public"]
+  tags_base: ["{iso3_lower}", "overture maps", "public"]
 
 # Spatial Filtering Configuration
 # Country ISO2 will be injected dynamically
@@ -56,6 +57,7 @@ selector:
   by: division_country  # or "bbox_only" for development
   iso2: "{iso2}"       # Will be populated from country registry
 
+### Queries below. Add your own here! ###
 # Data Targets and Specific Metadata
 targets:
   roads:

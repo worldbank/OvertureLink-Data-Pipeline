@@ -176,16 +176,17 @@ class TemplateConfigParser:
         release = self.overture.get('release', 'latest')
         release_year = release.split('-')[0] if '-' in release else str(now.year)
         
-        # Base variables available to all targets
+        # Base variables available to all targets 
         variables = {
             # Country/region
             'country_name': self.country.name,
             'iso2': self.country.iso2,
             'iso3': self.country.iso3,
+            'iso3_lower': self.country.iso3.lower(),
             'region': self.country.region,
             
             # Organization
-            'organization': self.organization.name,
+            'organization': self.organization.attribution,
             'contact_email': self.organization.contact_email,
             'license': self.organization.license,
             'update_frequency': self.organization.update_frequency,
@@ -204,6 +205,13 @@ class TemplateConfigParser:
             'sector_tag': target_config.get('sector_tag', target_name),
             'data_type': target_config.get('data_type', 'Geospatial Data'),
         }
+        
+        # Now resolve attribution template using the variables we just created
+        attribution_template = self.templates.get('attribution', '')
+        if attribution_template:
+            variables['attribution'] = self._resolve_template_string(attribution_template, variables)
+        else:
+            variables['attribution'] = ''
         
         return variables
     

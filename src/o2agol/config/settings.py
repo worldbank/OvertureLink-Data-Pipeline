@@ -19,14 +19,92 @@ Environment Variables (AGOL_ standard):
 
 import logging
 import os
+import hashlib
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Set, Dict
+from collections import deque
 
 from arcgis.gis import GIS
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+
+class LogContext(Enum):
+    """Context-aware logging levels for pipeline operations."""
+    PHASE = "PHASE"           # Major pipeline phases
+    MILESTONE = "MILESTONE"   # Key completion points
+    OPERATION = "OPERATION"   # Atomic operations
+    DEBUG = "DEBUG"          # Technical implementation details
+
+
+@dataclass
+class LogEntry:
+    """Structured log entry with deduplication support."""
+    message: str
+    context: LogContext
+    source: str  # Module/function origin
+    data: Optional[Dict[str, Any]] = None
+    _hash: Optional[str] = None  # For deduplication
+    
+    def __post_init__(self):
+        """Generate hash for deduplication."""
+        if self._hash is None:
+            hash_content = f"{self.message}:{self.context.value}:{self.source}"
+            self._hash = hashlib.md5(hash_content.encode()).hexdigest()
+
+
+class PipelineLogger:
+    """Enhanced logger with deduplication and context awareness."""
+    
+    def __init__(self, base_logger: logging.Logger, window_size: int = 10):
+        self.logger = base_logger
+        self.window_size = window_size
+        self.recent_hashes: deque = deque(maxlen=window_size)
+        self._message_counts: Dict[str, int] = {}
+    
+    def should_log(self, entry: LogEntry) -> bool:
+        """Determine if message should be logged based on deduplication rules."""
+        if entry._hash in self.recent_hashes:
+            self._message_counts[entry._hash] = self._message_counts.get(entry._hash, 0) + 1
+            return False
+        return True
+    
+    def log(self, context: LogContext, message: str, source: str = "", data: Optional[Dict] = None):
+        """Context-aware logging with deduplication."""
+        entry = LogEntry(message, context, source, data)
+        
+        if not self.should_log(entry):
+            return
+        
+        # Add to recent messages
+        self.recent_hashes.append(entry._hash)
+        
+        # Log at appropriate level based on context
+        if context in [LogContext.PHASE, LogContext.MILESTONE]:
+            self.logger.info(message)
+        elif context == LogContext.OPERATION:
+            self.logger.info(message)
+        else:  # DEBUG
+            self.logger.debug(message)
+    
+    def info(self, message: str, source: str = ""):
+        """Standard INFO logging with deduplication."""
+        self.log(LogContext.OPERATION, message, source)
+    
+    def debug(self, message: str, source: str = ""):
+        """Standard DEBUG logging with deduplication."""
+        self.log(LogContext.DEBUG, message, source)
+    
+    def phase(self, message: str, source: str = ""):
+        """Phase transition logging."""
+        self.log(LogContext.PHASE, message, source)
+    
+    def milestone(self, message: str, source: str = ""):
+        """Milestone completion logging."""
+        self.log(LogContext.MILESTONE, message, source)
 
 
 @dataclass
@@ -157,6 +235,11 @@ class Config:
         # Auto-detect from ENVIRONMENT variable
         config = Config()  # Uses $ENVIRONMENT or defaults to 'development'
     """
+    
+    # Class variables for GIS connection singleton
+    _gis_connection: Optional[GIS] = None
+    _connection_logged: bool = False
+    _pipeline_logger: Optional[PipelineLogger] = None
     
     def __init__(self, 
                  environment: Optional[str] = None,
@@ -360,6 +443,7 @@ class Config:
     def create_gis_connection(self, expiration: Optional[int] = None) -> GIS:
         """
         Create authenticated ArcGIS Online connection with extended timeout support.
+        Uses singleton pattern to avoid duplicate connections and logging.
         
         Args:
             expiration: Token expiration time in minutes (uses configured default if None)
@@ -370,6 +454,22 @@ class Config:
         Raises:
             ConfigurationError: If connection fails due to invalid credentials
         """
+        # Initialize pipeline logger if not already done
+        if Config._pipeline_logger is None:
+            Config._pipeline_logger = PipelineLogger(logger)
+        
+        # Check if we have a valid existing connection
+        if Config._gis_connection is not None:
+            try:
+                # Test connection validity
+                _ = Config._gis_connection.users.me
+                Config._pipeline_logger.debug("Reusing existing AGOL connection", "config.settings")
+                return Config._gis_connection
+            except:
+                # Connection is no longer valid, create new one
+                Config._gis_connection = None
+                Config._connection_logged = False
+        
         # Use provided expiration or fall back to configured default
         token_expiration = expiration if expiration is not None else self.agol.token_expiration
         
@@ -381,11 +481,14 @@ class Config:
                 expiration=token_expiration  # Extended expiration for long-running operations
             )
             
-            # Verify connection by accessing user properties
+            # Store connection and verify
+            Config._gis_connection = gis
             user_info = gis.users.me
-            logger.info(f"Connected to ArcGIS Online as {user_info.username}")
-            logger.info(f"Organization: {gis.properties.name}")
-            logger.info(f"Token expiration set to {token_expiration} minutes")
+            
+            # Log connection details only once
+            if not Config._connection_logged:
+                Config._pipeline_logger.info(f"Connected to AGOL as {user_info.username} ({gis.properties.name})", "config.settings")
+                Config._connection_logged = True
             
             return gis
             

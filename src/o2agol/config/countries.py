@@ -331,7 +331,7 @@ COUNTRIES: dict[str, CountryInfo] = {
         bbox=[6.02, 45.78, 10.44, 47.83]
     ),
     'CI': CountryInfo(
-        name='Ivory Coast',
+        name='Côte d\'Ivoire',
         iso2='CI',
         iso3='CIV',
         region='Sub-Saharan Africa',
