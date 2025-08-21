@@ -17,6 +17,7 @@ secrets/
 __pycache__/
 *.pyc
 .venv/
+*.py
 
 # VS Code
 .vscode/
@@ -44,3 +45,4 @@ overturedump/
 dev/
 tests/
 src/o2agol/debug.py
+docs/

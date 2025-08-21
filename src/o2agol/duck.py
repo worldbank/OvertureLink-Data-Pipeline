@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import platform
 import tempfile
 import time
+from pathlib import Path
+from typing import Iterable, Optional, Tuple, Dict, Any
 
 import duckdb
 import geopandas as gpd
@@ -91,6 +94,141 @@ def setup_duckdb_optimized(secure_config: Config) -> duckdb.DuckDBPyConnection:
     logging.info(f"DuckDB configured (advanced): {threads} threads @ {memory_per_thread}GB each, temp: {temp_dir}")
     logging.debug(f"PID-isolated temp directory: {temp_dir}")
     return con
+
+
+def set_duckdb_session(con: duckdb.DuckDBPyConnection) -> None:
+    """
+    Enable DuckDB remote/object caches and progress for faster S3/HTTP reads.
+    Safe to call multiple times.
+    """
+    con.execute("SET enable_http_metadata_cache=true;")
+    con.execute("SET enable_object_cache=true;")
+    con.execute("SET enable_progress_bar=true;")
+
+
+def describe_parquet_schema(con: duckdb.DuckDBPyConnection, url: str) -> pd.DataFrame:
+    """
+    Create a temp table from the parquet schema (LIMIT 0) and return DESCRIBE.
+    Use filename=true + hive_partitioning=1 if you rely on partitioned paths.
+    """
+    con.execute(f"""
+        CREATE OR REPLACE TABLE _o2_temp_schema AS
+        SELECT * FROM read_parquet('{url}', filename=true, hive_partitioning=1) LIMIT 0
+    """)
+    return con.execute("DESCRIBE _o2_temp_schema").df()
+
+
+def _fmt_num(v: float) -> str:
+    # Similar to invariant culture "G" with enough precision
+    return format(float(v), ".15g")
+
+
+def aoi_where_clause(bbox: Optional[Tuple[float, float, float, float]]) -> str:
+    """
+    Build a WHERE clause you can splice into a SELECT.
+    You must have min/max coordinates available; if you store bbox columns, adapt accordingly.
+    """
+    if not bbox:
+        return ""
+    xmin, ymin, xmax, ymax = bbox
+    return (
+        "WHERE bbox_xmin >= {xmin} AND bbox_ymin >= {ymin} "
+        "AND bbox_xmax <= {xmax} AND bbox_ymax <= {ymax}"
+    ).format(xmin=_fmt_num(xmin), ymin=_fmt_num(ymin), xmax=_fmt_num(xmax), ymax=_fmt_num(ymax))
+
+
+def materialize_current_table(
+    con: duckdb.DuckDBPyConnection,
+    url: str,
+    bbox: Optional[Tuple[float, float, float, float]] = None
+) -> int:
+    """
+    Builds a working table `_o2_current` from the parquet source, optionally filtered by `bbox`.
+    Returns row count. Early-exit on empty.
+    """
+    where = aoi_where_clause(bbox)
+    con.execute(f"""
+        CREATE OR REPLACE TABLE _o2_current AS
+        SELECT * FROM read_parquet('{url}', filename=true, hive_partitioning=1)
+        {where}
+    """)
+    cnt = con.execute("SELECT COUNT(*) FROM _o2_current").fetchone()[0]
+    return int(cnt)
+
+
+_GEOM_FAMILIES = {
+    "points": ("POINT", "MULTIPOINT"),
+    "lines": ("LINESTRING", "MULTILINESTRING"),
+    "polygons": ("POLYGON", "MULTIPOLYGON"),
+}
+
+
+def select_geometry_family(con: duckdb.DuckDBPyConnection, family: str) -> pd.DataFrame:
+    """
+    Returns a DataFrame for the given geometry family from `_o2_current`.
+    Ensures geometry is the last column: SELECT * EXCLUDE geometry, geometry
+    """
+    allowed = _GEOM_FAMILIES[family]
+    geom_in = ",".join(f"'{g}'" for g in allowed)
+    q = f"""
+        SELECT * EXCLUDE geometry, geometry
+        FROM _o2_current
+        WHERE ST_GeometryType(geometry) IN ({geom_in})
+    """
+    return con.execute(q).df()
+
+
+def export_parquet_by_family(
+    con: duckdb.DuckDBPyConnection,
+    out_dir: Path,
+    family: str,
+    filename: Optional[str] = None,
+    row_group_size: int = 100_000,
+    compression: str = "ZSTD",
+) -> Path:
+    """
+    COPY the selected family to a parquet file with row groups & compression.
+    Geometry column is last (per SELECT). Returns the output path.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = filename or f"{family.lower()}"
+    out = out_dir / f"{base}.parquet"
+    allowed = _GEOM_FAMILIES[family]
+    geom_in = ",".join(f"'{g}'" for g in allowed)
+    q = f"SELECT * EXCLUDE geometry, geometry FROM _o2_current WHERE ST_GeometryType(geometry) IN ({geom_in})"
+    con.execute(f"""
+        COPY ({q}) TO '{out.as_posix()}'
+        (FORMAT 'PARQUET', ROW_GROUP_SIZE {row_group_size}, COMPRESSION '{compression}')
+    """)
+    return out
+
+
+def fetch_family_df(
+    s3_url: str,
+    family: str,   # "points" | "lines" | "polygons"
+    bbox: Optional[Tuple[float, float, float, float]] = None,
+    use_cache: bool = False,
+    cache_dir: Optional[Path] = None,
+) -> pd.DataFrame:
+    con = duckdb.connect()
+    set_duckdb_session(con)
+
+    # (Optional) preview schema — log/validate if you want
+    _schema = describe_parquet_schema(con, s3_url)
+    logging.debug("Schema preview:\n%s", _schema)
+
+    # materialize current table with optional AOI
+    cnt = materialize_current_table(con, s3_url, bbox=bbox)
+    if cnt == 0:
+        logging.info("No rows after AOI filter; skipping.")
+        return pd.DataFrame()
+
+    # optional local parquet cache (fast retries/resume)
+    if use_cache and cache_dir:
+        export_parquet_by_family(con, cache_dir, family)
+
+    # return in-memory frame with geometry column last
+    return select_geometry_family(con, family)
 
 
 def fetch_gdf(config_obj, target_name: str, use_local_dump: bool = False, 
@@ -666,9 +804,10 @@ def _fetch_from_local_dump(config_obj, target_name: str, dump_manager, **kwargs)
         try:
             # Convert SQL-like filter to pandas query
             # This is a simplified filter application - more complex filters may need custom handling
+            import re
+            
             if 'class IN' in target_filter:
                 # Handle class IN (...) filters
-                import re
                 match = re.search(r"class IN \('([^']+)'\)", target_filter)
                 if match and 'class' in gdf.columns:
                     allowed_classes = match.group(1).split("', '")
@@ -679,6 +818,18 @@ def _fetch_from_local_dump(config_obj, target_name: str, dump_manager, **kwargs)
                 if match and 'class' in gdf.columns:
                     allowed_class = match.group(1)
                     gdf = gdf[gdf['class'] == allowed_class]
+            elif 'categories.primary =' in target_filter:
+                # Handle categories.primary = 'value' filters
+                match = re.search(r"categories\.primary = '([^']+)'", target_filter)
+                if match and 'category_primary' in gdf.columns:
+                    allowed_category = match.group(1)
+                    gdf = gdf[gdf['category_primary'] == allowed_category]
+            elif 'categories.primary IN' in target_filter:
+                # Handle categories.primary IN (...) filters
+                match = re.search(r"categories\.primary IN \('([^']+)'\)", target_filter)
+                if match and 'category_primary' in gdf.columns:
+                    allowed_categories = match.group(1).split("', '")
+                    gdf = gdf[gdf['category_primary'].isin(allowed_categories)]
             
             filtered_count = len(gdf)
             if filtered_count != original_count:

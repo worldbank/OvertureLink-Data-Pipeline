@@ -381,6 +381,68 @@ class DumpManager:
         
         return gdf
     
+    def _apply_target_filter(self, gdf: gpd.GeoDataFrame, target_filter: str) -> gpd.GeoDataFrame:
+        """
+        Apply target-specific filter to GeoDataFrame using same logic as duck.py
+        """
+        try:
+            import re
+            import pandas as pd
+            
+            if 'categories.primary =' in target_filter:
+                # Handle categories.primary = 'value' filters
+                match = re.search(r"categories\.primary = '([^']+)'", target_filter)
+                if match:
+                    allowed_category = match.group(1)
+                    if 'category_primary' in gdf.columns:
+                        # Use normalized column if available
+                        gdf = gdf[gdf['category_primary'] == allowed_category]
+                    elif 'categories' in gdf.columns:
+                        # Use raw Overture categories column (JSON)
+                        def has_primary_category(categories_json, target_cat):
+                            if pd.isna(categories_json) or categories_json is None:
+                                return False
+                            if isinstance(categories_json, dict) and 'primary' in categories_json:
+                                return categories_json['primary'] == target_cat
+                            return False
+                        
+                        gdf = gdf[gdf['categories'].apply(lambda x: has_primary_category(x, allowed_category))]
+            elif 'categories.primary IN' in target_filter:
+                # Handle categories.primary IN (...) filters
+                match = re.search(r"categories\.primary IN \('([^']+)'\)", target_filter)
+                if match:
+                    allowed_categories = match.group(1).split("', '")
+                    if 'category_primary' in gdf.columns:
+                        # Use normalized column if available
+                        gdf = gdf[gdf['category_primary'].isin(allowed_categories)]
+                    elif 'categories' in gdf.columns:
+                        # Use raw Overture categories column (JSON)
+                        def has_primary_category_in(categories_json, target_cats):
+                            if pd.isna(categories_json) or categories_json is None:
+                                return False
+                            if isinstance(categories_json, dict) and 'primary' in categories_json:
+                                return categories_json['primary'] in target_cats
+                            return False
+                        
+                        gdf = gdf[gdf['categories'].apply(lambda x: has_primary_category_in(x, allowed_categories))]
+            elif 'class IN' in target_filter:
+                # Handle class IN (...) filters
+                match = re.search(r"class IN \('([^']+)'\)", target_filter)
+                if match and 'class' in gdf.columns:
+                    allowed_classes = match.group(1).split("', '")
+                    gdf = gdf[gdf['class'].isin(allowed_classes)]
+            elif 'class =' in target_filter:
+                # Handle class = 'value' filters
+                match = re.search(r"class = '([^']+)'", target_filter)
+                if match and 'class' in gdf.columns:
+                    allowed_class = match.group(1)
+                    gdf = gdf[gdf['class'] == allowed_class]
+                    
+        except Exception as e:
+            logger.warning(f"Could not apply target filter '{target_filter}': {e}")
+        
+        return gdf
+    
     def query_local_dump_pyarrow(self, query: DumpQuery, release: str = "latest") -> gpd.GeoDataFrame:
         """
         PyArrow-based query for improved performance on local files.
@@ -1073,7 +1135,7 @@ class DumpManager:
         return self._cache_manager.get_cache_stats()
     
     def query_dual_theme(self, query: DumpQuery, building_filter: str, release: str = "latest", 
-                         config_obj=None, force_download: bool = False) -> Dict[str, gpd.GeoDataFrame]:
+                         config_obj=None, force_download: bool = False, target_name: str = None) -> Dict[str, gpd.GeoDataFrame]:
         """
         Handle dual-theme queries that require both places and buildings data.
         
@@ -1102,7 +1164,7 @@ class DumpManager:
             type_name=query.type,  # 'place' 
             release=release,
             use_divisions=True,
-            limit=query.limit,
+            limit=None,  # Don't limit cache retrieval - apply limit after filtering
             filters=query.filters
         )
         
@@ -1114,6 +1176,41 @@ class DumpManager:
             if places_gdf is None:
                 logger.info(f"Places cache miss - extracting data")
                 places_gdf = self._cache_manager.cache_country_data(places_query, config_obj)
+        
+        # Apply target-specific filter to places data if needed
+        if not places_gdf.empty and config_obj:
+            targets_config = None
+            if 'yaml' in config_obj and 'targets' in config_obj['yaml']:
+                targets_config = config_obj['yaml']['targets']
+            elif 'targets' in config_obj:
+                targets_config = config_obj['targets']
+            
+            if targets_config:
+                # Use provided target_name or fall back to first target
+                query_target_name = target_name if target_name and target_name in targets_config else list(targets_config.keys())[0]
+                target_config = targets_config[query_target_name]
+                places_filter = target_config.get('filter')
+                logger.info(f"Places filter for {query_target_name}: '{places_filter}'")
+                if places_filter:
+                    original_count = len(places_gdf)
+                    logger.debug(f"Places GDF columns: {list(places_gdf.columns)}")
+                    if 'category_primary' in places_gdf.columns:
+                        unique_cats = places_gdf['category_primary'].unique()
+                        edu_count = len(places_gdf[places_gdf['category_primary'] == 'education'])
+                        logger.info(f"Found {edu_count} places with category_primary='education' out of {len(unique_cats)} unique categories")
+                    places_gdf = self._apply_target_filter(places_gdf, places_filter)
+                    if len(places_gdf) != original_count:
+                        logger.info(f"Applied places filter: {original_count:,} -> {len(places_gdf):,} features")
+                    else:
+                        logger.warning(f"Filter '{places_filter}' did not reduce feature count")
+        
+            else:
+                logger.debug(f"No targets config found in config_obj")
+        
+        # Apply limit to places data after filtering
+        if not places_gdf.empty and query.limit and len(places_gdf) > query.limit:
+            places_gdf = places_gdf.head(query.limit)
+            logger.info(f"Limited places results to {query.limit} features")
         
         if not places_gdf.empty:
             result['places'] = places_gdf

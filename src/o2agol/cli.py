@@ -21,6 +21,7 @@ from .duck import fetch_gdf
 from .dump_manager import DumpManager, DumpConfig
 from .publish import publish_or_update
 from .transform import normalize_schema
+from .types import StagingFormat
 
 load_dotenv()
 
@@ -258,6 +259,9 @@ def get_query_info(config_path: str, query_name: str) -> dict[str, Any]:
 def export_to_geojson(data, output_path: str, target_name: str) -> None:
     """Export transformed features to GeoJSON file.
     
+    Data should already be cleaned and flattened by the transform pipeline,
+    so this function can use standard geopandas export without complex cleaning.
+    
     Args:
         data: GeoDataFrame or dict of GeoDataFrames (for multi-layer)
         output_path: Path where GeoJSON file will be saved
@@ -279,6 +283,7 @@ def export_to_geojson(data, output_path: str, target_name: str) -> None:
         layer_counts = {}
         
         for layer_name, gdf in data.items():
+            # Use standard geopandas export - data should already be clean
             layer_features = gdf.to_json()
             layer_data = json.loads(layer_features)
             
@@ -302,7 +307,7 @@ def export_to_geojson(data, output_path: str, target_name: str) -> None:
             }
         }
     else:
-        # Single GeoDataFrame
+        # Single GeoDataFrame - use standard geopandas export
         features_json = data.to_json()
         features_data = json.loads(features_json)
         
@@ -441,6 +446,9 @@ def process_target(
     log_to_file: bool = False,
     country: Optional[str] = None,
     skip_cleanup: bool = False,
+    staging_format: StagingFormat = StagingFormat.GEOJSON,
+    use_async: bool = False,
+    use_analyze: bool = True,
 ):
     """
     Execute data processing pipeline for specified target with comprehensive logging.
@@ -699,12 +707,13 @@ def process_target(
             })()
         
         # Choose appropriate publishing method
+        # Use parameters from CLI for flexibility in deployment
         if is_dual_query:
             from .publish import publish_multi_layer_service
-            result = publish_multi_layer_service(normalized_data, target_adapter, mode)
+            result = publish_multi_layer_service(normalized_data, target_adapter, mode, use_async, use_analyze, staging_format)
             total_published = sum(len(gdf) for gdf in normalized_data.values())
         else:
-            result = publish_or_update(gdf, target_adapter, mode)
+            result = publish_or_update(gdf, target_adapter, mode, use_async, use_analyze, staging_format)
             total_published = len(gdf)
         
         # Generate execution summary for audit and monitoring
@@ -792,6 +801,9 @@ def arcgis_upload(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
+    staging_format: Annotated[StagingFormat, typer.Option("--staging-format", help="Format for staging data during append operations (geojson or gpkg)")] = StagingFormat.GEOJSON,
+    use_async: Annotated[bool, typer.Option("--use-async", help="Use asynchronous processing for large datasets")] = False,
+    use_analyze: Annotated[bool, typer.Option("--use-analyze/--no-analyze", help="Enable AGOL analyze for optimal parameters")] = True,
 ):
     """
     Upload processed Overture Maps data to ArcGIS Online.
@@ -832,6 +844,11 @@ def arcgis_upload(
     # Log which query is being executed
     logging.info(f"Executing Overture query: {query}")
     
+    # Validate staging format for append operations
+    if mode == "append" and staging_format not in [StagingFormat.GEOJSON, StagingFormat.GPKG]:
+        logging.error(f"Invalid staging format '{staging_format}' for append mode. Must be 'geojson' or 'gpkg'")
+        raise typer.Exit(1)
+    
     # Execute the query using existing process_target function
     process_target(
         target_name=query,
@@ -846,7 +863,10 @@ def arcgis_upload(
         use_divisions=use_divisions,
         log_to_file=log_to_file,
         country=country,
-        skip_cleanup=skip_cleanup
+        skip_cleanup=skip_cleanup,
+        staging_format=staging_format,
+        use_async=use_async,
+        use_analyze=use_analyze
     )
 
 
@@ -922,7 +942,10 @@ def geojson_download(
         use_divisions=use_divisions,
         log_to_file=log_to_file,
         country=country,
-        skip_cleanup=skip_cleanup
+        skip_cleanup=skip_cleanup,
+        staging_format=StagingFormat.GEOJSON,  # Not used for geojson export
+        use_async=False,  # Not used for geojson export
+        use_analyze=True  # Not used for geojson export
     )
 
 
@@ -1018,6 +1041,9 @@ def overture_dump(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     # Cache optimization flags
     use_world_bank: Annotated[bool, typer.Option("--world-bank/--overture-divisions", help="Use World Bank boundaries (default: enabled)")] = True,
+    staging_format: Annotated[StagingFormat, typer.Option("--staging-format", help="Format for staging data during AGOL uploads (geojson or gpkg)")] = StagingFormat.GEOJSON,
+    use_async: Annotated[bool, typer.Option("--async", help="Use async append for large datasets")] = False,
+    use_analyze: Annotated[bool, typer.Option("--analyze", help="Analyze uploaded data before append")] = False,
 ):
     """
     Process Overture data using efficient country-specific caching.
@@ -1113,7 +1139,8 @@ def overture_dump(
     
     # Start overall timing
     operation_start_time = time.time()
-    logging.info(f"Starting overture-dump operation: {query} for {country}")
+    operation_mode = "AGOL upload" if output_format == "agol" else "GeoJSON export" if output_format == "geojson" else "overture-dump"
+    logging.info(f"Starting {operation_mode} operation: {query} for {country}")
     logging.info(f"Execution timestamp: {datetime.now()}")
     
     # Phase timings
@@ -1278,7 +1305,8 @@ def overture_dump(
                 building_filter, 
                 release, 
                 cfg, 
-                force_download=force_download
+                force_download=force_download,
+                target_name=query
             )
         else:
             query_result = dump_manager.query_local_dump(query_obj, release, cfg, force_download=force_download)
@@ -1366,7 +1394,9 @@ def overture_dump(
                 
                 # Use multi-layer publishing service (same as arcgis-upload command)
                 from .publish import publish_multi_layer_service
-                result = publish_multi_layer_service(transformed_data, target_adapter, mode)
+                
+                # Use parameters from CLI for flexibility
+                result = publish_multi_layer_service(transformed_data, target_adapter, mode, use_async, use_analyze, staging_format)
                 
                 # publish_multi_layer_service returns the published item, not a dict
                 if result:
@@ -1446,7 +1476,8 @@ def overture_dump(
                         'agol': type('AGOLConfig', (), target_config.get('agol', {}))()
                     })()
                 
-                result = publish_or_update(gdf_transformed, target_adapter, mode)
+                # Use parameters from CLI for flexibility
+                result = publish_or_update(gdf_transformed, target_adapter, mode, use_async, use_analyze, staging_format)
                 
                 # publish_or_update returns the published item, not a dict
                 if result:

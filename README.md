@@ -3,7 +3,11 @@
 ## Purpose
 Choose your Overture query, specify the country, then you're done!
 
-This cloud-native ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases.
+This cloud-native ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases.
+
+### Development status
+
+Please note development is ongoing. The pipeline works with all the options described below. The only issue is when running large polygon datasets >8 million. Sometimes there are hang ups with ArcGIS Online during appending. We're investigating the best options to reduce these errors, such as setting the right append parameters and testing upload as a FGDB.
 
 ### Three commands
 - `agol-upload` - Upload your query to ArcGIS Online
