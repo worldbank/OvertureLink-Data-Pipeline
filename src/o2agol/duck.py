@@ -776,7 +776,7 @@ def _fetch_from_local_dump(config_obj, target_name: str, dump_manager, **kwargs)
         type=type_,
         country=iso2,
         bbox=bbox,
-        filters=target_config.get('filters'),
+        filters=target_config.get('filter'),
         limit=limit
     )
     

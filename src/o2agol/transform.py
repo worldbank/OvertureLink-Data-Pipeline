@@ -135,25 +135,17 @@ def sanitize_field_names(gdf: gpd.GeoDataFrame, layer_type: str = "generic") -> 
             
         new_name = col
         
-        # Handle reserved keywords
-        if col.lower() in RESERVED_KEYWORDS:
-            new_name = RESERVED_KEYWORDS[col.lower()]
-        
-        # Apply field improvements
-        elif col in FIELD_IMPROVEMENTS:
-            new_name = FIELD_IMPROVEMENTS[col]
-        
         # Ensure field name length is under 31 characters (AGOL limit)
         if len(new_name) > 30:
             new_name = new_name[:30]
             
-        # Clean up any remaining issues
+        # Clean up any remaining character issues
         new_name = new_name.replace(' ', '_').replace('-', '_')
         
         if new_name != col:
             rename_mapping[col] = new_name
     
-    # Apply the renaming
+    # Apply the renaming only for length/character issues
     if rename_mapping:
         gdf = gdf.rename(columns=rename_mapping)
     
@@ -386,7 +378,6 @@ def _normalize_places_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     # Add building-specific fields for mixed data
     if "class" in gdf.columns:
         result_gdf["building_class"] = gdf["class"].astype(str)
-    
     if "height" in gdf.columns:
         result_gdf["height_m"] = _safe_numeric_convert(gdf["height"], float)
     

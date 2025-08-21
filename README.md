@@ -6,13 +6,17 @@ Choose your Overture query, specify the country, then you're done!
 This cloud-native ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases.
 
 ### Development status
-
 Please note development is ongoing. The pipeline works with all the options described below. The only issue is when running large polygon datasets >8 million. Sometimes there are hang ups with ArcGIS Online during appending. We're investigating the best options to reduce these errors, such as setting the right append parameters and testing upload as a FGDB.
 
 ### Three commands
 - `agol-upload` - Upload your query to ArcGIS Online
 - `geojson-download` - Download your query in .geojson format
 - `overture-dump` - Caches your query (by country / theme) for continued use without need for multiple downloads.
+
+### Features
+- Automatic AGOL discovery: The pipeline will either create a new feature layer or use truncate and append based on whether or not a feature layer already exists. 
+- Online and cache query: Query from Overture directly, or download a dump for consecutive uses.
+- Robust options: Custom configs, feature limits, debug logging, and more.
 
 ## Pipeline Overview
 - Configuration (`configs\global.yml`): Easily change metadata, choose the Overture release, or add your own queries.
@@ -81,8 +85,6 @@ The Python CLI has three main commands: uploading to AGOL, downloading as geojso
    `python -m o2agol.cli list-queries`
 
 And add you own query in the global config (`configs\global.yml`)
-
-Note: The pipeline automatically detects existing AGOL layers and updates them using truncate and append.
 
 ## Config
 
@@ -181,6 +183,7 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - Validation errors: Re-download with `--force-download`
 - Memory errors: Reduce `DUMP_MAX_MEMORY` or use `--limit`
 - Disk space: Use `o2agol list-dumps` to check space usage
+- Larger data uploads (8+ million features) can sometimes hang on the upload to ArcGIS. We are actively trying to figure out the best way to deal with this.
 
 #### Performance Tips  
 - Use `--use-bbox` for development (faster spatial filtering)

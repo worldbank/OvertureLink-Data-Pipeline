@@ -50,7 +50,6 @@ class DatasetSize:
 
 from .cleanup import get_pid_temp_dir  # make sure this import exists at the top
 
-
 # Helper functions for hardened append path
 def _target_append_fields(feature_layer, source_cols: list[str]) -> list[str]:
     """Build explicit append_fields list from the intersection of target field NAMES and source columns.
@@ -239,10 +238,9 @@ def _append_via_item_hardened(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS, us
         for error in cleanup_errors:
             logging.warning(error)
 
-
 def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gpd.GeoDataFrame:
     """
-    Advanced geometry validation and cleaning for problematic Overture building data.
+    Advanced geometry validation and cleaning for all polygon data types.
     
     This function addresses the most common causes of AGOL "Unknown error" failures:
     1. Complex MultiPolygon structures with excessive coordinate counts
@@ -265,19 +263,19 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
     if gdf.empty:
         return gdf
     
-    logging.info(f"Validating and cleaning {len(gdf):,} geometries for {layer_name}")
+    logging.debug(f"Validating and cleaning {len(gdf):,} geometries for {layer_name}")
     original_count = len(gdf)
     
     # Step 1: Remove null geometries
     null_mask = gdf.geometry.isna()
     if null_mask.any():
-        logging.warning(f"Removing {null_mask.sum()} null geometries")
+        logging.debug(f"Removing {null_mask.sum()} null geometries")
         gdf = gdf[~null_mask].copy()
     
     # Step 2: Remove empty geometries  
     empty_mask = gdf.geometry.apply(lambda x: x.is_empty if x is not None else True)
     if empty_mask.any():
-        logging.warning(f"Removing {empty_mask.sum()} empty geometries")
+        logging.debug(f"Removing {empty_mask.sum()} empty geometries")
         gdf = gdf[~empty_mask].copy()
     
     # Step 3: Advanced polygon cleaning for all polygon data
@@ -352,7 +350,7 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
                 return None
         
         # Apply cleaning
-        logging.info("Applying advanced geometry cleaning for polygon data...")
+        logging.debug("Applying advanced geometry cleaning for polygon data...")
         cleaned_geoms = gdf.geometry.apply(clean_polygon_geometry)
         
         # Remove features with None geometries
@@ -361,7 +359,7 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
         removed_count = len(gdf) - cleaned_count
         
         if removed_count > 0:
-            logging.warning(f"Removed {removed_count} features with uncleanlable geometries")
+            logging.debug(f"Removed {removed_count} features with uncleanlable geometries")
             gdf = gdf[valid_mask].copy()
             gdf.geometry = cleaned_geoms[valid_mask]
         else:
@@ -371,16 +369,19 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
     removed_total = original_count - final_count
     
     if removed_total > 0:
-        logging.info(f"Geometry cleaning complete: {final_count:,} features remaining ({removed_total} removed)")
+        logging.debug(f"Geometry validation complete: {final_count:,} features ({removed_total} removed)")
     else:
-        logging.info(f"Geometry cleaning complete: {final_count:,} features validated")
+        logging.debug(f"Geometry validation complete: {final_count:,} features")
     
     return gdf
 
 # Configuration constants for large dataset handling
 LARGE_DATASET_SEED_SIZE = int(os.environ.get('LARGE_DATASET_SEED_SIZE', '1000'))
 LARGE_DATASET_BATCH_SIZE = int(os.environ.get('LARGE_DATASET_BATCH_SIZE', '5000'))
-BUILDING_LARGE_THRESHOLD = int(os.environ.get('BUILDING_LARGE_THRESHOLD', '5000000'))
+BUILDING_LARGE_THRESHOLD = int(os.environ.get('BUILDING_LARGE_THRESHOLD', '10000000'))
+
+# Default capabilities for published feature services
+DEFAULT_CAPABILITIES = os.environ.get('AGOL_CAPABILITIES', 'Query,Create,Update,Delete')
 
 
 def _login_gis_for_publish() -> GIS:
@@ -502,56 +503,6 @@ def _analyze_dataset_size(gdf: gpd.GeoDataFrame) -> DatasetSize:
     )
 
 
-def _get_large_dataset_publish_params(dataset_size: DatasetSize, service_name: str) -> PublishParams:
-    """
-    Generate optimized publishing parameters for large datasets.
-    
-    Uses dataset analysis to create parameters that avoid AGOL limitations
-    and optimize performance for large polygon datasets.
-    
-    Args:
-        dataset_size: Dataset analysis results
-        service_name: Service name for publishing
-        
-    Returns:
-        Optimized publish parameters
-    """
-    feature_count = dataset_size['feature_count']
-    geometry_type = dataset_size['geometry_type']
-    
-    # Base parameters optimized for large datasets
-    params: PublishParams = {
-        'name': service_name,
-        'hasStaticData': True,
-        'maxRecordCount': 5000,  # Standard maximum for query performance
-        'layerInfo': {
-            'capabilities': 'Query,Extract',
-            'hasStaticData': True,
-            'maxRecordCount': 5000
-        }
-    }
-    
-    # Polygon-specific optimizations
-    if geometry_type in ['Polygon', 'MultiPolygon']:
-        params['layerInfo']['geometryType'] = 'esriGeometryPolygon'
-        params['layerInfo']['hasZ'] = False
-        params['layerInfo']['hasM'] = False
-        
-        # For very large polygon datasets, reduce query limits
-        if feature_count > 5_000_000:
-            params['maxRecordCount'] = 2000
-            params['layerInfo']['maxRecordCount'] = 2000
-    
-    elif geometry_type in ['LineString', 'MultiLineString']:
-        params['layerInfo']['geometryType'] = 'esriGeometryPolyline'
-        
-    elif geometry_type in ['Point', 'MultiPoint']:
-        params['layerInfo']['geometryType'] = 'esriGeometryPoint'
-        # Points can handle larger query sizes
-        params['maxRecordCount'] = 10000
-        params['layerInfo']['maxRecordCount'] = 10000
-    
-    return params
 
 
 def _gdf_to_geojson_tempfile(gdf: gpd.GeoDataFrame) -> tempfile.NamedTemporaryFile:
@@ -642,6 +593,7 @@ def _create_feature_service(
     
     # Create temporary GeoJSON
     tmp = _gdf_to_geojson_tempfile(gdf)
+    item = None  # Track GeoJSON item for cleanup
     
     try:
         logging.info(f"Creating AGOL item with {len(item_properties)} metadata fields")
@@ -725,14 +677,14 @@ def _create_feature_service(
             except Exception as analyze_error:
                 logging.warning(f"AGOL analyze failed, using basic parameters: {analyze_error}")
         
-        # Add/override with our optimized parameters (matching manual publish)
+        # Add/override with our optimized parameters (enabling monthly updates)
         feature_count = len(gdf)
         publish_params.update({
             'name': service_name,
-            'hasStaticData': True,
+            'hasStaticData': False,  # Enable dynamic updates for monthly refresh
             'maxRecordCount': 2000,  # Match manual publish exactly
             'layerInfo': {
-                'capabilities': 'Query'  # Match manual publish exactly
+                'capabilities': DEFAULT_CAPABILITIES  # Enable truncate-and-append workflows
             },
             'fieldTypesVersion': 'V2'  # Add missing parameter from manual publish
         })
@@ -840,14 +792,25 @@ def _create_feature_service(
                 logging.error("Overwrite error on NEW service - likely staged item deletion timing issue")
                 logging.error("Staged item preserved for debugging - check AGOL interface")
             
-            # CRITICAL FIX: Do NOT delete staged GeoJSON item on publish failure
-            # This was causing cascade failures when AGOL couldn't find the source
+            # To not delete staged GeoJSON item on publish failure
+            # Previously was causing cascade failures when AGOL couldn't find the source
             logging.error(f"Service publish failed: {publish_error}")
             logging.info(f"Staged item preserved for debugging: {item.itemid}")
             logging.info("Manual cleanup required: delete the staged GeoJSON item from AGOL interface")
             
             raise RuntimeError(f"Failed to publish service: {publish_error}")
             
+    except (KeyboardInterrupt, SystemExit):
+        # Handle interruptions (Ctrl+C, process kill) - cleanup GeoJSON item
+        if item:
+            logging.info(f"Process interrupted - cleaning up GeoJSON item: {item.itemid}")
+            cleanup_success = _cleanup_geojson_item(item)
+            if cleanup_success:
+                logging.info(f"Successfully cleaned up interrupted GeoJSON item: {item.itemid}")
+            else:
+                logging.warning(f"Failed to cleanup interrupted GeoJSON item: {item.itemid}")
+        raise
+        
     finally:
         # Always cleanup temp file
         try:
@@ -894,13 +857,13 @@ def _initial_with_seed_and_append(
     service_name = tgt.agol.service_name
     title = tgt.agol.item_title
     
-    logging.info(f"Using seed-and-append strategy for large dataset: {feature_count:,} features")
+    logging.debug(f"Using seed-and-append strategy for large dataset: {feature_count:,} features")
     
     # PHASE 1: Create seed with small sample to establish schema
     seed_size = min(LARGE_DATASET_SEED_SIZE, feature_count)
     seed_gdf = gdf.head(seed_size)
     
-    logging.info(f"Creating service schema with seed sample: {seed_size:,} features")
+    logging.debug(f"Creating service schema with seed sample: {seed_size:,} features")
     
     # Prepare seed data for AGOL
     prepared_seed = _prepare_gdf_for_agol(seed_gdf, "single-layer")
@@ -976,6 +939,7 @@ def _append_via_batches(
     
     Implements proper chunking for large datasets with explicit staging format support.
     """
+
     total = len(gdf)
     if total == 0:
         logging.info("No features to append.")
@@ -1117,11 +1081,15 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial", use_asy
             
             # STANDARD PATH: Check dataset size and route to appropriate strategy
             dataset_size = _analyze_dataset_size(gdf)
-            
-            if dataset_size.is_large_dataset:
-                logging.info(f"Large dataset detected: {len(gdf):,} features, estimated {dataset_size.file_size_mb:.1f}MB")
+            seed_threshold = int(os.environ.get('INITIAL_SEED_THRESHOLD', '150000'))
+
+            if dataset_size.is_large_dataset or len(gdf) > seed_threshold:
+                logging.info(
+                    f"Large dataset detected: {len(gdf):,} features, "
+                    f"estimated {dataset_size.file_size_mb:.1f}MB"
+                )
                 logging.info("Using seed-and-append strategy to avoid analyze timeouts")
-                
+
                 # Use seed-and-append strategy for large datasets
                 return _initial_with_seed_and_append(gis, gdf, tgt, dataset_size, use_async, use_analyze, staging_format)
 
@@ -1147,8 +1115,9 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial", use_asy
             }
             
             # Clean up any orphaned items before creating new service
-            logging.debug(f"Checking for orphaned GeoJSON items for service: {service_name}")
-            _cleanup_orphaned_geojson_items(gis, service_name)
+            logging.info(f"Checking for orphaned items and recycle bin conflicts for service: {service_name}")
+            logging.info("Note: If recycle bin conflicts exist, you may be prompted for permanent deletion confirmation")
+            _cleanup_orphaned_items(gis, service_name, title)
             
             # Use unified feature service creation with AGOL analyze
             try:
@@ -1249,7 +1218,6 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial", use_asy
             logging.info("Existing data cleared")
         
         # Update approach for monthly data replacement while preserving item_id
-        # CRITICAL FIX: Always prepare data before any update operations
         logging.info(f"Preparing {len(gdf):,} features for overwrite/append")
         prepared_gdf = _prepare_gdf_for_agol(gdf, "single-layer-update")
         
@@ -1262,7 +1230,6 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial", use_asy
         # Hardened single-path append - no fallback, fail fast
         _append_via_item(feature_layer, prepared_gdf, gis, use_async, use_analyze, staging_format)
         logging.info("Data append completed successfully")
-        
         logging.info(f"Data update operation completed - Item ID preserved: {item_id}")
         
         # Get final count (with brief delay for AGOL indexing)
@@ -1471,8 +1438,9 @@ def publish_multi_layer_service(layer_data: LayerBundle, tgt, mode: str = "auto"
     }
     
     # Clean up any orphaned items before creating new service
-    logging.debug(f"Checking for orphaned GeoJSON items for multi-layer service: {service_name}")
-    _cleanup_orphaned_geojson_items(gis, service_name)
+    logging.info(f"Checking for orphaned items and recycle bin conflicts for multi-layer service: {service_name}")
+    logging.info("Note: If recycle bin conflicts exist, you may be prompted for permanent deletion confirmation")
+    _cleanup_orphaned_items(gis, service_name, title)
     
     # Use unified feature service creation with AGOL analyze
     try:
@@ -1839,10 +1807,6 @@ def _prepare_gdf_for_agol(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gp
     # Explicitly set geometry column for spatial accessor
     prepared_gdf = prepared_gdf.set_geometry('geometry')
     
-    # CRITICAL: Apply advanced geometry validation for building data
-    # This addresses the primary cause of "Unknown error" in AGOL publishing
-    if any(gt in ['Polygon', 'MultiPolygon'] for gt in prepared_gdf.geometry.geom_type.unique()):
-        prepared_gdf = validate_and_clean_geometries(prepared_gdf, layer_name)
     
     # Ensure CRS is WGS84
     if prepared_gdf.crs is None:
@@ -1860,76 +1824,6 @@ def _prepare_gdf_for_agol(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gp
         if null_count > 0:
             logging.warning(f"Removing {null_count} null geometries from {layer_name}")
             prepared_gdf = prepared_gdf[~null_mask].copy()
-    
-    # Enhanced polygon processing with complexity analysis
-    geom_types = prepared_gdf.geometry.geom_type.unique()
-    has_polygons = any(gt in ['Polygon', 'MultiPolygon'] for gt in geom_types)
-    
-    if has_polygons:
-        logging.debug(f"Processing polygon geometries for {layer_name}")
-        
-        # CRITICAL: Analyze and simplify complex polygons before AGOL publishing
-        from shapely.geometry import MultiPolygon, Polygon
-        import warnings
-        warnings.filterwarnings('ignore', category=UserWarning)
-        
-        def simplify_complex_polygon(geom, tolerance=0.0001):
-            """Simplify overly complex polygons that cause AGOL publishing failures"""
-            try:
-                if isinstance(geom, (Polygon, MultiPolygon)):
-                    # Count total coordinates to detect complexity
-                    coord_count = 0
-                    if isinstance(geom, Polygon):
-                        coord_count = len(geom.exterior.coords)
-                        if geom.interiors:
-                            coord_count += sum(len(interior.coords) for interior in geom.interiors)
-                    elif isinstance(geom, MultiPolygon):
-                        for poly in geom.geoms:
-                            coord_count += len(poly.exterior.coords)
-                            if poly.interiors:
-                                coord_count += sum(len(interior.coords) for interior in poly.interiors)
-                    
-                    # Simplify if overly complex (>1000 coordinates often cause AGOL failures)
-                    if coord_count > 1000:
-                        simplified = geom.simplify(tolerance, preserve_topology=True)
-                        # Ensure simplification didn't break the geometry
-                        if simplified.is_valid and not simplified.is_empty:
-                            return simplified
-                
-                # Convert single Polygon to MultiPolygon for consistency
-                if isinstance(geom, Polygon):
-                    return MultiPolygon([geom])
-                elif isinstance(geom, MultiPolygon):
-                    return geom
-                else:
-                    return geom
-            except Exception:
-                # If simplification fails, return original geometry
-                return geom
-        
-        # Apply simplification and normalization
-        prepared_gdf.geometry = prepared_gdf.geometry.apply(simplify_complex_polygon)
-        
-        # Log complexity statistics
-        sample_coords = []
-        for geom in prepared_gdf.geometry.head(100):
-            if isinstance(geom, (Polygon, MultiPolygon)):
-                coord_count = 0
-                if isinstance(geom, Polygon):
-                    coord_count = len(geom.exterior.coords)
-                elif isinstance(geom, MultiPolygon):
-                    for poly in geom.geoms:
-                        coord_count += len(poly.exterior.coords)
-                sample_coords.append(coord_count)
-        
-        if sample_coords:
-            avg_coords = sum(sample_coords) / len(sample_coords)
-            max_coords = max(sample_coords)
-            logging.info(f"Polygon complexity for {layer_name}: avg={avg_coords:.0f} coords, max={max_coords} coords")
-            if max_coords > 1000:
-                logging.warning(f"High complexity polygons detected - this may cause AGOL publishing issues")
-        
-        logging.debug(f"Processed and normalized polygons for {layer_name}")
     
     # Note: Invalid geometry repair now handled by validate_and_clean_geometries
     # for polygon data, but keep basic validation for non-polygon data
@@ -2001,7 +1895,7 @@ def _prepare_gdf_for_agol(gdf: gpd.GeoDataFrame, layer_name: str = "data") -> gp
             logging.warning(f"Found {null_geom_count} null geometries after preparation")
         
         # Check for extremely small or degenerate geometries
-        if has_polygons:
+        if any(gt in ['Polygon', 'MultiPolygon'] for gt in prepared_gdf.geometry.geom_type.unique()):
             empty_geom_count = sum(1 for geom in prepared_gdf.geometry if geom.is_empty)
             if empty_geom_count > 0:
                 logging.warning(f"Found {empty_geom_count} empty geometries - these may cause publishing issues")
@@ -2042,10 +1936,8 @@ def _cleanup_geojson_item(item, max_retries: int = 3) -> bool:
         True if successfully deleted, False otherwise
     """
     import time
-    
     if not item:
         return True
-        
     for attempt in range(max_retries):
         try:
             # Attempt to delete the item
@@ -2183,27 +2075,106 @@ def _cleanup_geojson_item(item, max_retries: int = 3) -> bool:
     return False
 
 
-def _cleanup_orphaned_geojson_items(gis, service_name: str) -> int:
+def _confirm_permanent_delete(item, interactive_mode: bool = True, apply_to_all: bool = False) -> tuple[bool, bool]:
     """
-    Clean up orphaned GeoJSON items from previous failed attempts.
+    Ask user confirmation before permanently deleting an item from recycle bin.
+    
+    Args:
+        item: ArcGIS item to potentially delete
+        interactive_mode: Whether running interactively (can ask for input)
+        apply_to_all: Current state of apply_to_all flag
+        
+    Returns:
+        Tuple of (should_delete: bool, new_apply_to_all: bool)
+    """
+    import sys
+    
+    if not interactive_mode:
+        # In non-interactive mode (CI/CD), don't do permanent deletes
+        return False, apply_to_all
+    
+    if apply_to_all:
+        return True, apply_to_all
+    
+    # Show item details for informed decision
+    print(f"\n⚠️  PERMANENT DELETION REQUIRED")
+    print(f"Item in recycle bin is blocking service creation:")
+    print(f"  Title: {item.title}")
+    print(f"  Type: {item.type}")
+    print(f"  Owner: {getattr(item, 'owner', 'Unknown')}")
+    print(f"  Item ID: {item.itemid}")
+    print(f"\n❗ This item will be PERMANENTLY DELETED and cannot be recovered!")
+    print(f"This is required to create a new service with the same name.")
+    
+    while True:
+        try:
+            response = input("\nPermanently delete this item? [y/N/a(pply to all)]: ").lower().strip()
+            
+            if response in ['y', 'yes']:
+                return True, apply_to_all
+            elif response in ['n', 'no', '']:
+                print("Skipping permanent deletion. Service creation may fail due to name conflict.")
+                return False, apply_to_all
+            elif response in ['a', 'all', 'apply to all']:
+                print("Applying 'yes' to all remaining permanent delete confirmations.")
+                return True, True
+            else:
+                print("Please enter 'y' (yes), 'n' (no), or 'a' (apply to all)")
+                
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            return False, apply_to_all
+        except EOFError:
+            # Non-interactive environment detected
+            print("Non-interactive environment detected. Skipping permanent deletion.")
+            return False, apply_to_all
+
+
+def _cleanup_orphaned_items(gis, service_name: str, title: str = None) -> int:
+    """
+    Clean up orphaned items and recycle bin conflicts that prevent service creation.
+    
+    Handles both orphaned GeoJSON items from failed attempts and items in the recycle bin
+    that conflict with service names, preventing new service creation.
     
     Args:
         gis: Authenticated GIS connection
         service_name: Service name to search for related orphaned items
+        title: Service title to check for title conflicts (optional)
         
     Returns:
         Number of items cleaned up
     """
+    import sys
+    
     cleaned_count = 0
     
+    # Detect if running interactively (has stdin and can prompt user)
+    interactive_mode = hasattr(sys.stdin, 'isatty') and sys.stdin.isatty()
+    apply_to_all = False  # Track if user chose "apply to all"
+    
     try:
-        # Search for GeoJSON items that might be orphaned from this service
-        # Look for items with the service name or temporary naming patterns
+        # Search for ALL items that might be orphaned or causing recycle bin conflicts
+        # Remove type restrictions to catch CSV, Shapefile, Geodatabase, and other items
         search_patterns = [
-            f'title:*{service_name}* AND type:"GeoJson"',
+            # Service name conflicts - search ALL item types 
+            f'title:*{service_name}*',
+            f'name:*{service_name}*',
+            # Specific type searches for known patterns
             f'title:*temp* AND type:"GeoJson" AND tags:"overture-pipeline"',
-            f'title:*staging* AND type:"GeoJson" AND owner:{gis.users.me.username}'
+            f'title:*staging* AND type:"GeoJson" AND owner:{gis.users.me.username}',
+            # Service-specific patterns
+            f'title:*{service_name}* AND type:"Feature Service"',
+            f'title:*{service_name}* AND type:"GeoJson"'
         ]
+        
+        # Add title-based searches if title is provided - search ALL types
+        if title:
+            search_patterns.extend([
+                f'title:"{title}"',  # All items with exact title match
+                f'title:"{title}" AND type:"Feature Service"',
+                f'title:"{title}" AND type:"GeoJson"'
+            ])
         
         orphaned_items = []
         
@@ -2230,8 +2201,8 @@ def _cleanup_orphaned_geojson_items(gis, service_name: str) -> int:
                         if 'temporary' in [tag.lower() for tag in item_tags]:
                             is_orphaned = True
                     
-                    # Check 3: No related feature services
-                    if not is_orphaned:
+                    # Check 3: No related feature services (for GeoJSON items)
+                    if not is_orphaned and item.type == "GeoJson":
                         try:
                             related_services = item.related_items(relationship_type='Service2Data', direction='reverse')
                             if not related_services:
@@ -2242,6 +2213,20 @@ def _cleanup_orphaned_geojson_items(gis, service_name: str) -> int:
                         except Exception:
                             pass
                     
+                    # Check 4: Recycle bin conflicts (Feature Services that might be in recycle bin)
+                    if not is_orphaned and item.type == "Feature Service":
+                        try:
+                            # Try to access item properties to see if it's accessible
+                            _ = item.title
+                            _ = item.url
+                            # If we reach here, item is accessible - check if it matches our patterns
+                            if (service_name.lower() in item.title.lower() or 
+                                (title and title.lower() == item.title.lower())):
+                                is_orphaned = True
+                        except Exception:
+                            # Item might be in recycle bin or inaccessible - mark for cleanup
+                            is_orphaned = True
+                    
                     if is_orphaned and item not in orphaned_items:
                         orphaned_items.append(item)
                         
@@ -2250,12 +2235,72 @@ def _cleanup_orphaned_geojson_items(gis, service_name: str) -> int:
         
         # Clean up identified orphaned items
         for item in orphaned_items:
-            logging.info(f"Cleaning up orphaned GeoJSON item: {item.title} ({item.itemid})")
-            if _cleanup_geojson_item(item):
+            logging.info(f"Cleaning up orphaned {item.type} item: {item.title} ({item.itemid})")
+            
+            cleaned = False
+            if item.type == "GeoJson":
+                # Use existing GeoJSON cleanup method (regular delete only)
+                cleaned = _cleanup_geojson_item(item)
+            else:
+                # For all other item types, try regular delete first
+                try:
+                    # First try regular delete
+                    result = item.delete()
+                    if result:
+                        cleaned = True
+                        logging.info(f"Regular delete successful for {item.title}")
+                    else:
+                        # Regular delete failed - item likely in recycle bin, needs permanent delete
+                        should_delete, apply_to_all = _confirm_permanent_delete(
+                            item, interactive_mode, apply_to_all
+                        )
+                        
+                        if should_delete:
+                            result = item.delete(permanent=True)
+                            if result:
+                                cleaned = True
+                                logging.info(f"✓ Permanently deleted recycle bin item: {item.title}")
+                            else:
+                                logging.warning(f"Failed to permanently delete {item.title}")
+                        else:
+                            logging.info(f"Skipped permanent deletion of {item.title} (user declined)")
+                            
+                except Exception as e:
+                    # Exception during regular delete - try permanent delete with confirmation
+                    error_msg = str(e).lower()
+                    if 'does not exist' in error_msg or 'not found' in error_msg:
+                        logging.debug(f"Item {item.title} already deleted")
+                        cleaned = True
+                    else:
+                        logging.debug(f"Regular delete failed for {item.title}: {e}")
+                        
+                        should_delete, apply_to_all = _confirm_permanent_delete(
+                            item, interactive_mode, apply_to_all
+                        )
+                        
+                        if should_delete:
+                            try:
+                                result = item.delete(permanent=True)
+                                if result:
+                                    cleaned = True
+                                    logging.info(f"✓ Permanently deleted conflicting item: {item.title}")
+                                else:
+                                    logging.warning(f"Failed to permanently delete {item.title}")
+                            except Exception as perm_error:
+                                logging.warning(f"Could not permanently delete {item.title}: {perm_error}")
+                        else:
+                            logging.info(f"Skipped permanent deletion of {item.title} (user declined)")
+            
+            if cleaned:
                 cleaned_count += 1
             
         if cleaned_count > 0:
-            logging.info(f"Cleaned up {cleaned_count} orphaned GeoJSON items")
+            logging.info(f"✓ Cleaned up {cleaned_count} orphaned/conflicting items")
+            if not interactive_mode:
+                logging.info("Note: Running in non-interactive mode - permanent deletions were skipped")
+        elif orphaned_items:
+            logging.info(f"Found {len(orphaned_items)} potential conflicts but none were cleaned up")
+            logging.info("This may cause service creation failures due to name conflicts")
         
     except Exception as e:
         logging.warning(f"Error during orphaned item cleanup: {e}")

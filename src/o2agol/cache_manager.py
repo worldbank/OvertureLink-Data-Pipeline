@@ -50,7 +50,18 @@ def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame
                 column = parts[0].strip()
                 value = parts[1].strip().strip("'\"")
                 
-                if column in gdf.columns:
+                # Handle nested column access like 'categories.primary'
+                if "." in column:
+                    base_col, nested_key = column.split(".", 1)
+                    if base_col in gdf.columns:
+                        logger.debug(f"Applying nested filter: {column} = {value}")
+                        # Filter based on nested dictionary access
+                        mask = gdf[base_col].apply(lambda x: isinstance(x, dict) and x.get(nested_key) == value if x is not None else False)
+                        return gdf[mask]
+                    else:
+                        logger.warning(f"Base column '{base_col}' not found in data, returning empty result")
+                        return gdf.iloc[0:0]
+                elif column in gdf.columns:
                     return gdf[gdf[column] == value]
                 else:
                     logger.warning(f"Column '{column}' not found in data, returning empty result")
@@ -69,7 +80,18 @@ def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame
                     # Split by comma and clean up quotes
                     values = [v.strip().strip("'\"") for v in values_str.split(",")]
                     
-                    if column in gdf.columns:
+                    # Handle nested column access like 'categories.primary'
+                    if "." in column:
+                        base_col, nested_key = column.split(".", 1)
+                        if base_col in gdf.columns:
+                            logger.debug(f"Applying nested IN filter: {column} IN {values}")
+                            # Filter based on nested dictionary access
+                            mask = gdf[base_col].apply(lambda x: isinstance(x, dict) and x.get(nested_key) in values if x is not None else False)
+                            return gdf[mask]
+                        else:
+                            logger.warning(f"Base column '{base_col}' not found in data, returning empty result")
+                            return gdf.iloc[0:0]
+                    elif column in gdf.columns:
                         return gdf[gdf[column].isin(values)]
                     else:
                         logger.warning(f"Column '{column}' not found in data, returning empty result")
@@ -195,7 +217,7 @@ class CountryCacheManager:
             if query.limit:
                 gdf = gdf.head(query.limit)
             
-            logger.info(f"Retrieved {len(gdf):,} features from cache: {cache_file.name}")
+            logger.debug(f"Cache hit: {cache_file.name} ({len(gdf):,} features)")
             return gdf
             
         except Exception as e:
@@ -239,7 +261,7 @@ class CountryCacheManager:
             release=query.release,
             use_divisions=query.use_divisions,
             limit=None,  # Never apply limits when caching
-            filters=query.filters
+            filters=None  # Never apply filters when caching - cache complete data
         )
         gdf = self._extract_country_data(extraction_query, config_obj)
         
@@ -268,12 +290,12 @@ class CountryCacheManager:
         metadata_file.write_text(json.dumps(metadata.to_dict(), indent=2))
         
         elapsed = time.time() - start_time
-        logger.info(f"Cached {len(gdf):,} features in {elapsed:.1f}s: {cache_file.name}")
+        logger.debug(f"Cached {len(gdf):,} features in {elapsed:.1f}s: {cache_file.name}")
         
         # Apply limit to the result if specified in original query
         if query.limit:
             gdf = gdf.head(query.limit)
-            logger.info(f"Applied limit: returning {len(gdf):,} features")
+            logger.debug(f"Applied limit: returning {len(gdf):,} features")
         
         return gdf
     
