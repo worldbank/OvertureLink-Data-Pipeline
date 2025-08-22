@@ -4,7 +4,7 @@
 ## Purpose
 Choose your Overture query, specify the country, then you're done!
 
-This ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases. This pipeline was originally built to support the World Bank's distributed data across ArcGIS Hubs, but should work for other work flows. 
+This ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as different file types for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases. This pipeline was originally built to support the World Bank's distributed data across ArcGIS Hubs, but should work for other work flows. 
 
 ### Three commands
 - `arcgis-upload` - Upload your query to ArcGIS Online
@@ -190,8 +190,9 @@ We're investigating the best options to reduce these errors, such as setting the
 
 ## Planned for future
 - More testing for best way of appending large datasets (>8 million).
-- More transformation options for users.
+- More transformation options for users, including having relevant fields properly transformed.
 - Interactive CLI for easier downloading.
+- Download larger dumps, such as by region or entire global dump by theme.
 
 
 ## Sources
@@ -200,3 +201,7 @@ We're investigating the best options to reduce these errors, such as setting the
 - Chris Holme's excellent tutoral here: https://github.com/cholmes/duckdb-geoparquet-tutorials/tree/main
 - Georock's post on spatial clipping: https://geo.rocks/post/duckdb_geospatial/
 - Bounding Box extracts from Natural Earth: https://github.com/sandstrom/country-bounding-boxes/tree/master
+<<<<<<< Updated upstream
+=======
+- This ArcGIS Pro extension that helped inspire this workflow: https://github.com/COF-RyLopez/ArcGISPro-GeoParquet-Addin
+>>>>>>> Stashed changes
