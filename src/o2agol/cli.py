@@ -258,106 +258,6 @@ def get_query_info(config_path: str, query_name: str) -> dict[str, Any]:
     return targets[query_name]
 
 
-def export_to_geojson(data, output_path: str, target_name: str) -> None:
-    """Export transformed features to GeoJSON file.
-    
-    Data should already be cleaned and flattened by the transform pipeline,
-    so this function can use standard geopandas export without complex cleaning.
-    
-    Args:
-        data: GeoDataFrame or dict of GeoDataFrames (for multi-layer)
-        output_path: Path where GeoJSON file will be saved
-        target_name: Target data type for metadata
-        
-    Raises:
-        IOError: If file cannot be written
-        ValueError: If features are not valid
-    """
-    # Ensure directory exists
-    output_dir = os.path.dirname(output_path)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    
-    # Handle both single GeoDataFrame and multi-layer dict
-    if isinstance(data, dict):
-        # Multi-layer: combine all features
-        all_features = []
-        layer_counts = {}
-        
-        for layer_name, gdf in data.items():
-            # Use standard geopandas export - data should already be clean
-            layer_features = gdf.to_json()
-            layer_data = json.loads(layer_features)
-            
-            # Add layer identifier to each feature
-            for feature in layer_data.get("features", []):
-                feature["properties"]["layer"] = layer_name
-            
-            all_features.extend(layer_data.get("features", []))
-            layer_counts[layer_name] = len(layer_data.get("features", []))
-        
-        # Create combined GeoJSON
-        geojson_data = {
-            "type": "FeatureCollection",
-            "features": all_features,
-            "metadata": {
-                "generated": datetime.utcnow().isoformat(),
-                "source": "overture-agol-pipeline",
-                "target": target_name,
-                "layers": layer_counts,
-                "total_count": len(all_features)
-            }
-        }
-    else:
-        # Single GeoDataFrame - use standard geopandas export
-        features_json = data.to_json()
-        features_data = json.loads(features_json)
-        
-        geojson_data = {
-            "type": "FeatureCollection",
-            "features": features_data.get("features", []),
-            "metadata": {
-                "generated": datetime.utcnow().isoformat(),
-                "source": "overture-agol-pipeline", 
-                "target": target_name,
-                "count": len(features_data.get("features", []))
-            }
-        }
-    
-    # Write with proper encoding and formatting
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(geojson_data, f, indent=2, ensure_ascii=False)
-    
-    # Validate written file
-    if not validate_geojson_file(output_path):
-        raise ValueError(f"Generated GeoJSON file is invalid: {output_path}")
-    
-    logging.info(f"GeoJSON export completed: {len(geojson_data['features']):,} features written to {output_path}")
-
-
-def validate_geojson_file(filepath: str) -> bool:
-    """Validate that exported GeoJSON file is properly formatted."""
-    try:
-        with open(filepath, encoding='utf-8') as f:
-            data = json.load(f)
-        
-        # Basic GeoJSON structure validation
-        if data.get("type") != "FeatureCollection":
-            logging.error("Invalid GeoJSON: missing FeatureCollection type")
-            return False
-        
-        if "features" not in data:
-            logging.error("Invalid GeoJSON: missing features array")
-            return False
-        
-        if not isinstance(data["features"], list):
-            logging.error("Invalid GeoJSON: features must be an array")
-            return False
-        
-        return True
-    except Exception as e:
-        logging.error(f"GeoJSON validation failed: {e}")
-        return False
 
 
 def get_selector_config(cfg: dict[str, Any], iso2: Optional[str] = None) -> dict[str, Any]:
@@ -513,7 +413,7 @@ def process_target(
         if dry_run:
             cmd_parts.append("--dry-run")
     else:  # geojson mode
-        cmd_parts = ["python", "-m", "o2agol.cli", "geojson-download", target_name]
+        cmd_parts = ["python", "-m", "o2agol.cli", "export", target_name]
         if output_path:
             cmd_parts.append(output_path)
         cmd_parts.extend(["-c", config])
@@ -753,41 +653,211 @@ def process_target(
         raise
 
 
-def generate_export_filename(query: str, country: str = None) -> str:
+def process_target_for_export(
+    target_name: str,
+    config: str,
+    output_path: str,
+    export_format: str = "geojson",
+    raw_export: bool = False,
+    limit: Optional[int] = None,
+    iso2: Optional[str] = None,
+    verbose: bool = False,
+    use_divisions: bool = True,
+    log_to_file: bool = False,
+    country: Optional[str] = None,
+    skip_cleanup: bool = False,
+):
     """
-    Generate default export filename using {iso3}_{query}.geojson pattern
+    Execute data processing pipeline for export with comprehensive logging.
     
     Args:
-        query: Query name (e.g., 'education', 'roads')
-        country: Country identifier (ISO2, ISO3, or name)
-        
-    Returns:
-        Generated filename string
+        target_name: Data target identifier (roads, buildings, etc.)
+        config: Path to YAML configuration file
+        output_path: Export file path
+        export_format: Export format (geojson, gpkg, fgdb)
+        raw_export: Skip AGOL transformations for raw export
+        limit: Optional feature limit for testing and development
+        iso2: ISO2 country code override (legacy)
+        verbose: Enable detailed logging output
+        use_divisions: Use Overture Divisions for precise boundaries
+        log_to_file: Create timestamped log files
+        country: Country code/name for global config mode
+        skip_cleanup: Skip temp file cleanup for debugging
     """
+    # Initialize logging with optional file output
+    setup_logging(verbose, target_name, "export", log_to_file)
+    
+    # Register cleanup handlers for graceful interruption handling
+    register_cleanup_handlers()
+    
+    # Perform temp directory cleanup and validation
+    if not full_cleanup_check(skip_cleanup=skip_cleanup):
+        logging.error("Temp directory size limit exceeded - aborting operation")
+        raise typer.Exit(1)
+    
+    # Log execution context for audit trails
+    start_time = datetime.now()
+    logging.info(f"Initiating export operation for {target_name} target")
+    logging.info(f"Execution timestamp: {start_time}")
+    
+    # Log the original Python command for reproducibility
+    cmd_parts = ["python", "-m", "o2agol.cli", "export", target_name]
+    if output_path:
+        cmd_parts.append(output_path)
+    cmd_parts.extend(["-c", config])
+    
+    # Add common parameters
+    if export_format != "geojson":
+        cmd_parts.extend(["--format", export_format])
+    if raw_export:
+        cmd_parts.append("--raw")
+    if limit:
+        cmd_parts.extend(["--limit", str(limit)])
+    if iso2:
+        cmd_parts.extend(["--iso2", iso2])
     if country:
-        from .config.countries import CountryRegistry
-        try:
-            country_info = CountryRegistry.get_country(country)
-            if country_info:
-                iso3 = country_info.iso3
-                export_filename = f"{iso3.lower()}_{query}.geojson"
-                logging.info(f"Generated default export filename: {export_filename}")
-                return export_filename
-            else:
-                # Fallback if country not found
-                export_filename = f"{country}_{query}.geojson"
-                logging.warning(f"Country '{country}' not found in registry, using fallback filename: {export_filename}")
-                return export_filename
-        except (AttributeError, ValueError) as e:
-            # Fallback if country lookup fails
-            export_filename = f"{country}_{query}.geojson"
-            logging.warning(f"Could not resolve ISO3 for '{country}' ({e}), using fallback filename: {export_filename}")
-            return export_filename
+        cmd_parts.extend(["--country", country])
+    if not use_divisions:
+        cmd_parts.append("--use-bbox")
+    if verbose:
+        cmd_parts.append("--verbose")
+    if log_to_file:
+        cmd_parts.append("--log-to-file")
+    
+    command_str = " ".join(cmd_parts)
+    logging.info(f"Original command: {command_str}")
+    
+    logging.info(f"Configuration file: {config}")
+    logging.info(f"Feature limit: {limit or 'No limit (full dataset)'}")
+    logging.info(f"Spatial filtering method: {'Overture Divisions' if use_divisions else 'Bounding Box'}")
+    logging.info(f"Export format: {export_format}")
+    logging.info(f"Raw export: {raw_export}")
+    
+    # Validate parameter combinations
+    if country and iso2:
+        logging.warning(f"Both --country ({country}) and --iso2 ({iso2}) provided. Using --country for global config, --iso2 for selector override.")
+    
+    # Load unified configuration with optional country override
+    cfg = load_pipeline_config(config, country)
+    
+    # Log configuration status
+    logging.info(f"Connected to ArcGIS as: {cfg['gis'].users.me.username}")
+    logging.info(f"Environment: {cfg['environment']}")
+    logging.info(f"Overture release: {cfg['overture']['release']} (from YAML)")
+
+    # Get selector configuration with optional ISO2 override
+    selector = get_selector_config(cfg, iso2)
+    logging.debug(f"Selector configuration: {selector}")
+    
+    if iso2:
+        logging.info(f"Country code override applied: {iso2.upper()}")
     else:
-        # Use generic filename if no country specified
-        export_filename = f"{query}.geojson"
-        logging.info(f"No country specified, using generic filename: {export_filename}")
-        return export_filename
+        # Log the country being used from global config
+        selector_iso2 = selector.get('iso2')
+        if selector_iso2:
+            logging.info(f"Using country from global config: {selector_iso2}")
+
+    # Get target configuration
+    try:
+        target_config = get_target_config(cfg, target_name)
+        logging.info(f"Target theme: {target_config['theme']}, type: {target_config['type']}")
+    except (KeyError, ValueError) as e:
+        logging.error(str(e))
+        raise typer.Exit(1) from e
+
+    # Configure spatial filtering methodology
+    bbox_only = not use_divisions
+    
+    try:
+        logging.info("=" * 50)
+        logging.info("DATA ACQUISITION PHASE")
+        logging.info("=" * 50)
+        
+        if use_divisions:
+            logging.info("Implementing Overture Divisions-based country boundary filtering")
+        else:
+            logging.info(f"Applying bounding box spatial filter (bbox_only={bbox_only})")
+        
+        # Create configuration object for fetch_gdf
+        class ConfigAdapter:
+            def __init__(self, cfg_dict, selector_dict, target_dict, target_name):
+                self.yaml_config = cfg_dict['yaml']
+                self.secure_config = cfg_dict['secure']
+                self.overture_config = cfg_dict['overture']  # YAML-based config
+                # Store selector as a simple object with the dict as __dict__ 
+                self.selector = type('SelectorConfig', (), {})()
+                if selector_dict:
+                    self.selector.__dict__.update(selector_dict)
+                
+                # Create target config with instance attributes (not class attributes)
+                target_config_instance = type('TargetConfig', (), {})()
+                for key, value in target_dict.items():
+                    setattr(target_config_instance, key, value)
+                self.targets = {target_name: target_config_instance}
+                
+        config_adapter = ConfigAdapter(cfg, selector, target_config, target_name)
+        
+        # Execute data retrieval with specified parameters
+        data_result = fetch_gdf(config_adapter, target_name, limit=limit, bbox_only=bbox_only, use_divisions=use_divisions)
+        
+        # Handle dual query results (dict) vs single query (GeoDataFrame)
+        is_dual_query = isinstance(data_result, dict)
+        if is_dual_query:
+            total_features = sum(len(gdf) for gdf in data_result.values())
+            logging.info(f"Data acquisition completed: {total_features:,} features retrieved (dual query)")
+        else:
+            gdf = data_result
+            logging.info(f"Data acquisition completed: {len(gdf):,} features retrieved")
+
+        logging.info("=" * 50)
+        logging.info("DATA EXPORT PHASE")
+        logging.info("=" * 50)
+        
+        # Export decision point
+        if raw_export:
+            # Export raw Overture data without transformation
+            logging.info("Exporting raw Overture data (no AGOL transformations)")
+            from .export import export_data
+            export_data(
+                data=data_result,
+                output_path=output_path,
+                target_name=target_name,
+                export_format=export_format,
+                raw_export=True
+            )
+        else:
+            # Apply AGOL transformations then export
+            logging.info("Applying AGOL schema transformations")
+            normalized_data = normalize_schema(data_result, target_name)
+            
+            from .export import export_data
+            export_data(
+                data=normalized_data,
+                output_path=output_path,
+                target_name=target_name,
+                export_format=export_format,
+                raw_export=False
+            )
+        
+        # Calculate and log processing time
+        end_time = datetime.now()
+        duration = end_time - start_time
+        logging.info(f"Export operation completed successfully in {duration}")
+        logging.info(f"Output file: {output_path}")
+        
+    except Exception as e:
+        # Log comprehensive error information for debugging
+        logging.error("=" * 50)
+        logging.error("OPERATION FAILED")
+        logging.error("=" * 50)
+        logging.error(f"Error type: {type(e).__name__}")
+        logging.error(f"Error message: {str(e)}")
+        
+        if 'gdf' in locals():
+            logging.error(f"Features processed before failure: {len(gdf):,}")
+        
+        logging.error("Operation terminated due to error")
+        raise
 
 
 @app.command("arcgis-upload")
@@ -872,10 +942,12 @@ def arcgis_upload(
     )
 
 
-@app.command("geojson-download")
-def geojson_download(
+@app.command("export")
+def export_data_command(
     query: Annotated[str, typer.Argument(help="Query type to execute. Use 'list-queries' command to see available options.")],
-    output_path: Annotated[Optional[str], typer.Argument(help="Output GeoJSON file path (optional - will auto-generate if not provided)")] = None,
+    output_path: Annotated[Optional[str], typer.Argument(help="Output file path (optional - will auto-generate if not provided)")] = None,
+    format: Annotated[str, typer.Option("--format", "-f", help="Export format: geojson, gpkg, fgdb")] = "geojson",
+    raw: Annotated[bool, typer.Option("--raw", help="Export raw Overture data without AGOL transformations")] = False,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "configs/global.yml",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
@@ -884,30 +956,33 @@ def geojson_download(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without exporting")] = False,
 ):
     """
-    Download processed Overture Maps data as GeoJSON file.
+    Export Overture Maps data to various formats.
+    
+    Supports GeoJSON, GeoPackage (GPKG), and File Geodatabase (FGDB) formats.
+    Use --raw to export unmodified Overture data, or omit for AGOL-ready transformations.
     
     Query types are defined in the configuration file under 'targets' section.
     Standard queries include: roads, buildings, places, education, health, markets
     
-    If no output path is specified, a filename will be auto-generated using the 
-    pattern: {iso3}_{query}.geojson (e.g., afg_roads.geojson)
-    
     Examples:
-        Auto-generated filename:
-            o2agol geojson-download roads --country af
-            o2agol geojson-download education --country pak --limit 100
-            
-        Specify output file:
-            o2agol geojson-download buildings afghanistan_buildings.geojson --country af
-            
-        With development options:
-            o2agol geojson-download health --country afg --use-bbox --limit 50
-            
-        Custom config file:
-            o2agol geojson-download my_custom_query output.geojson -c configs/custom.yml
+        o2agol export roads --country afg                      # GeoJSON (default)
+        o2agol export roads --country afg --format gpkg        # GeoPackage
+        o2agol export places roads.gpkg --country afg --raw    # Raw data with custom filename
+        o2agol export education --country pak --format fgdb    # Multi-layer FGDB
     """
+    # Validate --dry-run is not used with export
+    if dry_run:
+        typer.echo("ERROR: --dry-run is not supported with export command. Use it with arcgis-upload instead.", err=True)
+        raise typer.Exit(1)
+    
+    # Auto-detect format from output path if provided
+    if output_path and not format:
+        from .export import ExportFormat
+        format = ExportFormat.from_extension(output_path).value
+    
     # Validate that the query exists in the configuration
     if not validate_query_exists(config, query):
         try:
@@ -924,30 +999,29 @@ def geojson_download(
     
     # Auto-generate filename if not provided
     if not output_path:
-        output_path = generate_export_filename(query, country)
+        from .export import generate_export_filename
+        output_path = generate_export_filename(query, country, format, raw)
         
     # Log which query is being executed
     logging.info(f"Executing Overture query: {query}")
     logging.info(f"Output file: {output_path}")
+    logging.info(f"Export format: {format}")
+    logging.info(f"Raw export: {raw}")
     
-    # Execute the query using existing process_target function
-    process_target(
+    # Execute the query using new process_target_for_export function
+    process_target_for_export(
         target_name=query,
         config=config,
-        output_mode="geojson",
-        mode=None,
         output_path=output_path,
+        export_format=format,
+        raw_export=raw,
         limit=limit,
         iso2=iso2,
-        dry_run=False,
         verbose=verbose,
         use_divisions=use_divisions,
         log_to_file=log_to_file,
         country=country,
         skip_cleanup=skip_cleanup,
-        staging_format=StagingFormat.GEOJSON,  # Not used for geojson export
-        use_async=False,  # Not used for geojson export
-        use_analyze=True  # Not used for geojson export
     )
 
 
@@ -1005,11 +1079,11 @@ def list_queries(
         if config == "configs/global.yml":
             typer.echo("\nUsage:")
             typer.echo("  Upload to ArcGIS Online: o2agol arcgis-upload <query_name> [options]")
-            typer.echo("  Export to GeoJSON:      o2agol geojson-download <query_name> [options]")
+            typer.echo("  Export data:            o2agol export <query_name> [options]")
         else:
             typer.echo("\nUsage:")
             typer.echo(f"  Upload to ArcGIS Online: o2agol arcgis-upload <query_name> -c {config} [options]")
-            typer.echo(f"  Export to GeoJSON:      o2agol geojson-download <query_name> -c {config} [options]")
+            typer.echo(f"  Export data:            o2agol export <query_name> -c {config} [options]")
         
     except FileNotFoundError:
         typer.echo(f"ERROR: Configuration file not found: {config}", err=True)

@@ -8,7 +8,7 @@ This ETL pipeline allows you to query and extract Overture Maps data (such as ro
 
 ### Three commands
 - `agol-upload` - Upload your query to ArcGIS Online
-- `geojson-download` - Download your query in .geojson format
+- `export` - Export your query to multiple formats (GeoJSON, GeoPackage, File Geodatabase)
 - `overture-dump` - Caches your query (by country / theme) for continued use without need for multiple downloads.
 
 ### Features
@@ -59,22 +59,28 @@ The Python CLI has three main commands: uploading to AGOL, downloading as geojso
 - Or using module directly:
    `python -m o2agol.cli arcgis-upload roads --country afg`
 
-#### Export to GeoJSON:
-- Export Afghanistan roads (auto-filename: afg_roads.geojson):
-   `o2agol geojson-download roads --country afg`
+#### Export to Multiple Formats:
+- Export Afghanistan roads to GeoJSON (auto-filename: afg_roads.geojson):
+   `o2agol export roads --country lux`
    
-- Or specify output file:
-   `o2agol geojson-download roads afghanistan_roads.geojson --country afg`
+- Export to GeoPackage format:
+   `o2agol export buildings --country lux --format gpkg`
+   
+- Export raw Overture data (no AGOL transformations):
+   `o2agol export places --country lux --format gpkg --raw`
+   
+- Export to custom filename with format auto-detection:
+   `o2agol export roads lux_roads.gpkg --country lux`
 
 #### Download local dump for consistent use
 - Example with Afghanistan country parameter, detects and downloads local dump.
-   `o2agol overture-dump roads --country afg`
+   `o2agol overture-dump roads --country lux`
 
 ### Review options
 - If needed you can always review options with the --help argument.
 - `o2agol --help`
 - `o2agol arcgis-upload --help`
-- `o2agol geojson-download --help`
+- `o2agol export --help`
 - `o2agol overture-dump --help`
 
 ### List Queries
@@ -104,15 +110,17 @@ Use `configs/global.yml` with the `--country` parameter:
 - Metadata automatically applied based on configuration
 - Supports lines (roads), points (places), polygons (buildings), and multi-layer services
 
-### GeoJSON Export
-- Standards-compliant GeoJSON FeatureCollection files
-- Includes metadata with generation timestamp and feature counts  
-- Auto-generated filenames follow pattern: {iso3}_{query}.geojson
+### Data Export (Multiple Formats)
+- **GeoJSON**: Standards-compliant JSON format (default)
+- **GeoPackage (GPKG)**: SQLite-based format with multi-layer support  
+- **File Geodatabase (FGDB)**: ESRI format for ArcGIS workflows
+- Auto-generated filenames follow pattern: {iso3}_{query}.{extension}
 - Full Unicode support for international place names
+- Raw export option preserves original Overture schema
 
 ## List of required arguments
-To build your command, you need three elemenets:
-- Whether you are uploading to AGOL or downloading geojson
+To build your command, you need three elements:
+- Whether you are uploading to AGOL or exporting data
 - The query you are using
 - The country you are querying
 
@@ -164,10 +172,11 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - `o2agol arcgis-upload education --country pakistan --log-to-file` - Pakistan education facilities with logging
 - `o2agol arcgis-upload buildings --country "south africa" --dry-run` - South Africa buildings (test mode)
 
-### GeoJSON Export:
-- `o2agol geojson-download roads --country afg` - Export Afghanistan roads (auto-filename: afg_roads.geojson)
-- `o2agol geojson-download health usa_health.geojson --country usa --limit 1000` - USA health facilities to specific file
-- `o2agol geojson-download education --country pak --use-bbox --limit 100` - Fast export with bounding box
+### Data Export:
+- `o2agol export roads --country afg` - Export Afghanistan roads to GeoJSON (auto-filename: afg_roads.geojson)
+- `o2agol export health usa_health.gpkg --country usa --limit 1000` - USA health facilities to GeoPackage
+- `o2agol export education --country pak --format gpkg --use-bbox --limit 100` - Fast export with bounding box to GPKG
+- `o2agol export buildings --country ind --format fgdb --raw` - Raw building data to File Geodatabase
 
 ## Development status
 Please note development began in August 2025 and is ongoing. The pipeline works with all the options described below. The only issue is when running large polygon datasets >8 million. Sometimes there are hang ups with ArcGIS Online during appending the feature layer. We tried to mitigate this by giving the user multiple export options, parameter options, and batch processing. 
