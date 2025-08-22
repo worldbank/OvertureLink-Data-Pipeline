@@ -1,12 +1,10 @@
-# Overture Maps Data to GeoJSON and ArcGIS Online Pipeline
+# OvertureLink
+## Flexible Overture data ingestion for AGOL and export workflows
 
 ## Purpose
 Choose your Overture query, specify the country, then you're done!
 
-This cloud-native ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases.
-
-### Development status
-Please note development is ongoing. The pipeline works with all the options described below. The only issue is when running large polygon datasets >8 million. Sometimes there are hang ups with ArcGIS Online during appending. We're investigating the best options to reduce these errors, such as setting the right append parameters and testing upload as a FGDB.
+This ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases. This pipeline was originally built to support the World Bank's distributed data across ArcGIS Hubs, but should work for other work flows. 
 
 ### Three commands
 - `agol-upload` - Upload your query to ArcGIS Online
@@ -16,6 +14,7 @@ Please note development is ongoing. The pipeline works with all the options desc
 ### Features
 - Automatic AGOL discovery: The pipeline will either create a new feature layer or use truncate and append based on whether or not a feature layer already exists. 
 - Online and cache query: Query from Overture directly, or download a dump for consecutive uses.
+- Large files can be run in batch mode to assist with uploading to AGOL.
 - Robust options: Custom configs, feature limits, debug logging, and more.
 
 ## Pipeline Overview
@@ -88,18 +87,11 @@ And add you own query in the global config (`configs\global.yml`)
 
 ## Config
 
-### Global Configuration (Recommended)
+### Global Configuration
 Use `configs/global.yml` with the `--country` parameter:
 - **Country Selection**: Specify any country using name, ISO2, or ISO3 code (supports 176 countries)
 - **Dynamic Processing**: Country metadata and bounding boxes are automatically loaded
 - **Template System**: All titles, descriptions, and metadata are dynamically generated
-
-### Legacy Country-Specific Configs
-`configs/<country>.yml` files are still supported:
-- `overture_release`: "latest" or a specific date
-- `selector`: ISO2 country code 
-- `targets`: roads/buildings with layer titles, item IDs, filters
-- `mode`: initial/overwrite/append
 
 ### Clip modes
 - Overture Division Clip: precise geometric clip with bbox pre-filtering. Use `--use-divisions` for production (default).
@@ -136,10 +128,10 @@ There are sets of queries prebuilt that you can find below and in the configs fi
 - `markets` - Retail facilities. Creates multi-layer service with both geometry types.
 
 #### Points Only
-- `places` - All points of interest (unfiltered places)
+- `places` - All points of interest 
 
 #### Polygons Only
-- `buildings` - Building footprints (all building polygons) 
+- `buildings` - Building footprints
 
 ### Choosing a Country
 
@@ -177,23 +169,21 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - `o2agol geojson-download health usa_health.geojson --country usa --limit 1000` - USA health facilities to specific file
 - `o2agol geojson-download education --country pak --use-bbox --limit 100` - Fast export with bounding box
 
-### Troubleshooting
+## Development status
+Please note development began in August 2025 and is ongoing. The pipeline works with all the options described below. The only issue is when running large polygon datasets >8 million. Sometimes there are hang ups with ArcGIS Online during appending the feature layer. We tried to mitigate this by giving the user multiple export options, parameter options, and batch processing. 
 
-#### Common Issues
+We're investigating the best options to reduce these errors, such as setting the right append parameters and testing uploads as different formats (GeoJson, FGDB, Geopackage). This will require extensive testing. Recently, we've had the most success uploading in gpkg format in batches of 500,000 (settings in your .env file can be changed).
+
+### Troubleshooting
 - Validation errors: Re-download with `--force-download`
 - Memory errors: Reduce `DUMP_MAX_MEMORY` or use `--limit`
 - Disk space: Use `o2agol list-dumps` to check space usage
-- Larger data uploads (8+ million features) can sometimes hang on the upload to ArcGIS. We are actively trying to figure out the best way to deal with this.
 
-#### Performance Tips  
-- Use `--use-bbox` for development (faster spatial filtering)
-- Increase `DUMP_MAX_MEMORY` if you have available RAM
-- Download dumps to SSD for better query performance
-- Use `--limit` for development to reduce processing time
+## Planned for future
+- More testing for best way of appending large datasets (>8 million).
+- More transformation options for users.
+- Interactive CLI for easier downloading.
 
-## CI/CD
-- `ci.yml`: lint, type-check, unit tests on PR/main.
-- `run-pipeline.yml`: manual (`workflow_dispatch`) or schedule (cron). Uses environment secrets.
 
 ## Sources
 - Overture documentation: https://docs.overturemaps.org/guides/divisions/

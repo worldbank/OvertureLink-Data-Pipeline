@@ -1,4 +1,4 @@
-"""Temporary file management for cloud-native pipeline operations."""
+"""Temporary file management for pipeline operations."""
 
 from __future__ import annotations
 

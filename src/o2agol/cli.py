@@ -14,6 +14,9 @@ import typer
 import yaml
 from dotenv import load_dotenv
 
+# Load environment variables BEFORE importing local modules that use them
+load_dotenv()
+
 from .cleanup import full_cleanup_check, register_cleanup_handlers
 from .config import Config
 from .config.settings import PipelineLogger, LogContext
@@ -23,8 +26,6 @@ from .dump_manager import DumpManager, DumpConfig
 from .publish import publish_or_update
 from .transform import normalize_schema
 from .types import StagingFormat
-
-load_dotenv()
 
 app = typer.Typer(help="Overture to AGOL pipeline")
 
