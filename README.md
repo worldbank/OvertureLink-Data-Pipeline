@@ -201,7 +201,4 @@ We're investigating the best options to reduce these errors, such as setting the
 - Chris Holme's excellent tutoral here: https://github.com/cholmes/duckdb-geoparquet-tutorials/tree/main
 - Georock's post on spatial clipping: https://geo.rocks/post/duckdb_geospatial/
 - Bounding Box extracts from Natural Earth: https://github.com/sandstrom/country-bounding-boxes/tree/master
-<<<<<<< Updated upstream
-=======
 - This ArcGIS Pro extension that helped inspire this workflow: https://github.com/COF-RyLopez/ArcGISPro-GeoParquet-Addin
->>>>>>> Stashed changes
