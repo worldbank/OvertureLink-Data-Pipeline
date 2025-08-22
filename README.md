@@ -7,7 +7,7 @@ Choose your Overture query, specify the country, then you're done!
 This ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as .geojson for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases. This pipeline was originally built to support the World Bank's distributed data across ArcGIS Hubs, but should work for other work flows. 
 
 ### Three commands
-- `agol-upload` - Upload your query to ArcGIS Online
+- `arcgis-upload` - Upload your query to ArcGIS Online
 - `export` - Export your query to multiple formats (GeoJSON, GeoPackage, File Geodatabase)
 - `overture-dump` - Caches your query (by country / theme) for continued use without need for multiple downloads.
 
