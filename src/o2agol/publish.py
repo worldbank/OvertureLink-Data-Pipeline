@@ -79,15 +79,14 @@ def _ensure_unique_index(layer, field_name: str) -> None:
         pass
 
 
-def _analyze_staged_item(gis, staged_item_id: str) -> dict:
+def _analyze_staged_item(gis, staged_item_id: str, file_type: str = 'geojson') -> dict:
     """Return publishParameters dict if analyze succeeds; else {}."""
     try:
-        item = gis.content.get(staged_item_id)
-        res = item.analyze()
+        res = gis.content.analyze(item=staged_item_id, file_type=file_type)
         if isinstance(res, dict) and "publishParameters" in res:
             return res["publishParameters"]
     except Exception as ex:
-        logging.warning("Analyze failed for item %s: %s", staged_item_id, ex)
+        logging.debug("Analyze failed for item %s (type=%s): %s", staged_item_id, file_type, ex)
     return {}
 
 
@@ -173,8 +172,12 @@ def _append_via_item_hardened(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS, us
         if not temp_item:
             raise StagingUploadError(None, "Failed to create staging item")
 
-        # Optional analyze
-        publish_params = _analyze_staged_item(gis, temp_item.id) if use_analyze else {}
+        # Optional analyze - determine file type based on staging format
+        if use_analyze:
+            analyze_file_type = 'geoPackage' if staging_format_str == 'gpkg' else 'geojson'
+            publish_params = _analyze_staged_item(gis, temp_item.id, analyze_file_type)
+        else:
+            publish_params = {}
 
         # Build explicit mapping + table name
         source_cols = [c for c in gdf.columns if c != "geometry"]
@@ -204,7 +207,7 @@ def _append_via_item_hardened(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS, us
         job = feature_layer.append(**append_kwargs)
         
         if use_async:
-            result = _poll_append_job(job, timeout_s=5400)
+            result = _poll_append_job(job, timeout_s=append_timeout)
             logging.info("Append completed: %s", result)
         else:
             logging.info("Append completed (sync).")
@@ -230,10 +233,14 @@ def _append_via_item_hardened(feature_layer, gdf: gpd.GeoDataFrame, gis: GIS, us
         
         if staging_file:
             try:
+                # Small delay to allow Windows to release file handles
+                time.sleep(0.5)
                 os.unlink(staging_file.name)
                 logging.debug("Staging file cleaned up")
             except Exception as e:
-                cleanup_errors.append(f"Failed to cleanup staging file: {e}")
+                # Log as debug instead of warning for less noise
+                logging.debug(f"Deferred cleanup for staging file: {e}")
+                # Don't add to cleanup_errors to reduce warning spam
         
         for error in cleanup_errors:
             logging.warning(error)
@@ -375,10 +382,12 @@ def validate_and_clean_geometries(gdf: gpd.GeoDataFrame, layer_name: str = "data
     
     return gdf
 
-# Configuration constants for large dataset handling
-LARGE_DATASET_SEED_SIZE = int(os.environ.get('LARGE_DATASET_SEED_SIZE', '1000'))
-LARGE_DATASET_BATCH_SIZE = int(os.environ.get('LARGE_DATASET_BATCH_SIZE', '5000'))
-BUILDING_LARGE_THRESHOLD = int(os.environ.get('BUILDING_LARGE_THRESHOLD', '10000000'))
+# Batch processing configuration
+batch_threshold = int(os.environ.get('BatchThreshold', '100000'))
+batch_size = int(os.environ.get('BatchSize', '300000'))
+seed_size = int(os.environ.get('SeedSize', '1000'))
+building_large_threshold = int(os.environ.get('BuildingLargeThreshold', '10000000'))
+append_timeout = int(os.environ.get('AppendTimeout', '7200'))  # Default 2 hours
 
 # Default capabilities for published feature services
 DEFAULT_CAPABILITIES = os.environ.get('AGOL_CAPABILITIES', 'Query,Create,Update,Delete')
@@ -491,7 +500,7 @@ def _analyze_dataset_size(gdf: gpd.GeoDataFrame) -> DatasetSize:
         feature_count > 1_000_000 or  # More than 1M features
         (estimated_size_mb > 500 and feature_count > 1000) or   # More than 500MB AND significant feature count (avoid size estimation bugs)
         complexity_score > 250 or    # High complexity score
-        (primary_geom_type in ['Polygon', 'MultiPolygon'] and feature_count > BUILDING_LARGE_THRESHOLD)  # Large building datasets
+        (primary_geom_type in ['Polygon', 'MultiPolygon'] and feature_count > building_large_threshold)  # Large building datasets
     )
     
     return DatasetSize(
@@ -608,6 +617,7 @@ def _create_feature_service(
         if analyze:
             try:
                 logging.debug("Analyzing GeoJSON for optimal publish parameters")
+                # Note: This is always geojson since _create_feature_service only handles GeoJSON for service creation
                 analyzed = gis.content.analyze(item=item.id, file_type='geojson')
                 analyze_params = analyzed.get('publishParameters', {})
                 
@@ -860,7 +870,7 @@ def _initial_with_seed_and_append(
     logging.debug(f"Using seed-and-append strategy for large dataset: {feature_count:,} features")
     
     # PHASE 1: Create seed with small sample to establish schema
-    seed_size = min(LARGE_DATASET_SEED_SIZE, feature_count)
+    seed_sample_size = min(seed_size, feature_count)
     seed_gdf = gdf.head(seed_size)
     
     logging.debug(f"Creating service schema with seed sample: {seed_size:,} features")
@@ -908,7 +918,7 @@ def _initial_with_seed_and_append(
             raise RuntimeError("No valid features remaining after preparation")
         
         # Batch append the full dataset
-        _append_via_batches(feature_layer, prepared_gdf, LARGE_DATASET_BATCH_SIZE, gis, use_async, use_analyze, staging_format)
+        _append_via_batches(feature_layer, prepared_gdf, batch_size, gis, use_async, use_analyze, staging_format)
         
         logging.info(f"Successfully populated service with {len(prepared_gdf):,} features")
         return fl_item
@@ -1227,8 +1237,14 @@ def publish_or_update(gdf: gpd.GeoDataFrame, tgt, mode: str = "initial", use_asy
         
         logging.info(f"Uploading {len(prepared_gdf):,} prepared features")
         
-        # Hardened single-path append - no fallback, fail fast
-        _append_via_item(feature_layer, prepared_gdf, gis, use_async, use_analyze, staging_format)
+        # Check if we need batching for large datasets (same as initial mode)
+        if len(prepared_gdf) > batch_threshold:
+            logging.info(f"Large dataset ({len(prepared_gdf):,} features) exceeds threshold ({batch_threshold:,})")
+            logging.info(f"Using batch append with size: {batch_size:,}")
+            _append_via_batches(feature_layer, prepared_gdf, batch_size, gis, use_async, use_analyze, staging_format)
+        else:
+            # Single append for smaller datasets - no fallback, fail fast
+            _append_via_item(feature_layer, prepared_gdf, gis, use_async, use_analyze, staging_format)
         logging.info("Data append completed successfully")
         logging.info(f"Data update operation completed - Item ID preserved: {item_id}")
         
