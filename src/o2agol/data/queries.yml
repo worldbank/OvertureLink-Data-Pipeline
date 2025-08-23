@@ -1,0 +1,153 @@
+roads:
+  # Data Selection
+  theme: transportation
+  type: segment
+  #filter: "class IN ('motorway', 'trunk', 'primary', 'secondary')"  # Major roads only filter if uncommented
+  
+  # Sector-specific Variables
+  sector_title: "Road Network"
+  sector_description: "road infrastructure"
+  sector_tag: "roads"
+  data_type: "Transportation Infrastructure"
+  
+  # ArcGIS Online Configuration
+  agol:
+    # Core Fields (will be templated)
+    item_title: "{title}"
+    snippet: "{snippet}"
+    description: "{description}"
+    service_name: "{service_name}"
+    
+    # Tags: base + sector-specific
+    tags: "{tags_base} + ['transportation', 'roads']"
+    
+    # ESRI Enterprise Metadata
+    access_information: "{access_information}"
+    license_info: "{license_info}"
+    
+    # Technical Configuration
+    upsert_key: "id"
+    # item_id: ""  # Will be populated after initial creation
+
+buildings:
+  # Data Selection
+  theme: buildings
+  type: building
+  # No filter - all buildings
+  
+  # Sector-specific Variables
+  sector_title: "Building Footprints"
+  sector_description: "building infrastructure"
+  sector_tag: "buildings"
+  data_type: "Building Infrastructure"
+  
+  # ArcGIS Online Configuration
+  agol:
+    item_title: "{title}"
+    snippet: "{snippet}"
+    description: "{description}"
+    service_name: "{service_name}"
+    tags: "{tags_base} + ['buildings', 'infrastructure']"
+    access_information: "{access_information}"
+    license_info: "{license_info}"
+    upsert_key: "id"
+    # item_id: ""
+
+education:
+  # Data Selection  
+  theme: places
+  type: place
+  filter: "categories.primary = 'education'"
+  building_filter: "subtype = 'education'"
+  
+  # Sector-specific Variables
+  sector_title: "Education Facilities"
+  sector_description: "educational institutions and facilities"
+  sector_tag: "education"
+  data_type: "Educational Infrastructure"
+  
+  # ArcGIS Online Configuration
+  agol:
+    item_title: "{title}"
+    snippet: "{snippet}"
+    description: "{description}"
+    service_name: "{service_name}"
+    tags: "{tags_base} + ['education', 'scorecard_education']"
+    access_information: "{access_information}"
+    license_info: "{license_info}"
+    upsert_key: "id"
+    # item_id: ""  # Will be added after initial creation
+
+health:
+  # Data Selection
+  theme: places
+  type: place
+  filter: "categories.primary = 'health_and_medical'"
+  building_filter: "subtype = 'medical'"
+  
+  # Sector-specific Variables
+  sector_title: "Health Facilities"
+  sector_description: "healthcare facilities and medical services"
+  sector_tag: "health"
+  data_type: "Healthcare Infrastructure"
+  
+  # ArcGIS Online Configuration
+  agol:
+    item_title: "{title}"
+    snippet: "{snippet}"
+    description: "{description}"
+    service_name: "{service_name}"
+    tags: "{tags_base} + ['scorecard_health', 'health facilities']"
+    access_information: "{access_information}"
+    license_info: "{license_info}"
+    upsert_key: "id"
+    # item_id: ""
+
+markets:
+  # Data Selection
+  theme: places
+  type: place
+  filter: "categories.primary IN ('retail', 'shopping', 'food_and_drink')"
+  building_filter: "subtype IN ('service', 'commercial')"
+  
+  # Sector-specific Variables
+  sector_title: "Marketplaces"
+  sector_description: "commercial markets and retail facilities"
+  sector_tag: "markets"
+  data_type: "Commercial Infrastructure"
+  
+  # ArcGIS Online Configuration
+  agol:
+    item_title: "{title}"
+    snippet: "{snippet}" 
+    description: "{description}"
+    service_name: "{service_name}"
+    tags: "{tags_base} + ['markets', 'scorecard_investment', 'scorecard_community']"
+    access_information: "{access_information}"
+    license_info: "{license_info}"
+    upsert_key: "id"
+    # item_id: ""
+
+places:
+  # Data Selection
+  theme: places
+  type: place
+  # No filter - all places
+  
+  # Sector-specific Variables
+  sector_title: "Points of Interest"
+  sector_description: "comprehensive points of interest and places"
+  sector_tag: "places"
+  data_type: "Points of Interest"
+  
+  # ArcGIS Online Configuration
+  agol:
+    item_title: "{title}"
+    snippet: "{snippet}"
+    description: "{description}"
+    service_name: "{service_name}"
+    tags: "{tags_base} + ['places', 'poi']"
+    access_information: "{access_information}"
+    license_info: "{license_info}"
+    upsert_key: "id"
+    # item_id: ""
