@@ -6,27 +6,31 @@ Choose your Overture query, specify the country, then you're done!
 
 This ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as different file types for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases. This pipeline was originally built to support the World Bank's distributed data across ArcGIS Hubs, but should work for other work flows. 
 
-### Three commands
-- `arcgis-upload` - Upload your query to ArcGIS Online
-- `export` - Export your query to multiple formats (GeoJSON, GeoPackage, File Geodatabase)
-- `overture-dump` - Caches your query (by country / theme) for continued use without need for multiple downloads.
+## Commands
+- `arcgis-upload` - Publish processed data to ArcGIS Online feature layers
+- `export` - Export data to GeoJSON, GeoPackage, or File Geodatabase formats
+- `overture-dump` - High-performance local caching system for multi-country operations
 
-### Features
+## Key Features
 - Automatic AGOL discovery: The pipeline will either create a new feature layer or use truncate and append based on whether or not a feature layer already exists. 
 - Online and cache query: Query from Overture directly, or download a dump for consecutive uses.
 - Large files can be run in batch mode to assist with uploading to AGOL.
 - Robust options: Custom configs, feature limits, debug logging, and more.
 
-## Pipeline Overview
-- Configuration (`configs\global.yml`): Easily change metadata, choose the Overture release, or add your own queries.
-- Ingest (`duck.py`): DuckDB reads Overture GeoParquet remotely from S3 with spatial queries and for data access.
-- Transform (`transform.py`): Normalize schema/geometry, retain stable Overture/GERS IDs, define/delete/add metadata fields. Turns into an easy to use .geojson for exporting if you wish.
-- Publish (`publish.py`): ArcGIS Python API with detection, automatically creates new layers or updates existing ones with data and metadata.
-- Data dump (`dump-manager.py`): Only for local country caching if you want to use it. Checks to see if there is data by country and theme for Overture and downloads if needed.
+## Architecture
+The pipeline follows a modular Source -> Transform -> Publish/Export process:
+
+- Data Ingestion (`pipeline/source.py`): Uses DuckDB S3 queries and local dump management. Geopackage is the default, but format can be changed.
+- Schema Transformation (`pipeline/transform.py`): Normalizes schema and geometry while retaining stable Overture IDs
+- ArcGIS Publishing (`pipeline/publish.py`): Handles feature layer creation, updates, and multi-layer services
+- Multi-Format Export (`pipeline/export.py`): Exports to GeoJSON, GeoPackage, and File Geodatabase formats
+- Configuration Management (`data folder`): Central folder for configuration of queries, metadata, and country data. 
 
 ## Requirements
-- Python 3.11+ (version must be compatiable with arcgis package)
-- AGOL credentials for upload. Originally created for World Bank AGOL, you can use this for your own purposes if you want with your own AGOl ccount or simply use it to export to .geojson without an AGOL account. There is an example .env file for you to use securely.
+- Python 3.11+ (compatible with ArcGIS Python API)
+- ArcGIS Online credentials (optional - only required for `arcgis-upload` and `overture-dump` command)
+
+The pipeline can be used for data export without ArcGIS Online credentials. Environment configuration is managed through `.env` files for secure credential storage.
 
 ## Setup for Local Use
 
@@ -72,10 +76,6 @@ The Python CLI has three main commands: uploading to AGOL, downloading as geojso
 - Export to custom filename with format auto-detection:
    `o2agol export roads lux_roads.gpkg --country lux`
 
-#### Download local dump for consistent use
-- Example with Afghanistan country parameter, detects and downloads local dump.
-   `o2agol overture-dump roads --country lux`
-
 ### Review options
 - If needed you can always review options with the --help argument.
 - `o2agol --help`
@@ -91,14 +91,6 @@ The Python CLI has three main commands: uploading to AGOL, downloading as geojso
 
 And add you own query in the global config (`configs\global.yml`)
 
-## Config
-
-### Global Configuration
-Use `configs/global.yml` with the `--country` parameter:
-- **Country Selection**: Specify any country using name, ISO2, or ISO3 code (supports 176 countries)
-- **Dynamic Processing**: Country metadata and bounding boxes are automatically loaded
-- **Template System**: All titles, descriptions, and metadata are dynamically generated
-
 ### Clip modes
 - Overture Division Clip: precise geometric clip with bbox pre-filtering. Use `--use-divisions` for production (default).
 - Box: bbox-only overlap for fastest processing. Use `--use-bbox` for development and testing.
@@ -111,12 +103,9 @@ Use `configs/global.yml` with the `--country` parameter:
 - Supports lines (roads), points (places), polygons (buildings), and multi-layer services
 
 ### Data Export (Multiple Formats)
-- **GeoJSON**: Standards-compliant JSON format (default)
-- **GeoPackage (GPKG)**: SQLite-based format with multi-layer support  
+- **GeoPackage (GPKG)**: SQLite-based format with multi-layer support (default)
+- **GeoJSON**: Standards-compliant JSON format 
 - **File Geodatabase (FGDB)**: ESRI format for ArcGIS workflows
-- Auto-generated filenames follow pattern: {iso3}_{query}.{extension}
-- Full Unicode support for international place names
-- Raw export option preserves original Overture schema
 
 ## List of required arguments
 To build your command, you need three elements:
@@ -178,21 +167,33 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - `o2agol export education --country pak --format gpkg --use-bbox --limit 100` - Fast export with bounding box to GPKG
 - `o2agol export buildings --country ind --format fgdb --raw` - Raw building data to File Geodatabase
 
-## Development status
-Please note development began in August 2025 and is ongoing. The pipeline works with all the options described below. The only issue is when running large polygon datasets >8 million. Sometimes there are hang ups with ArcGIS Online during appending the feature layer. We tried to mitigate this by giving the user multiple export options, parameter options, and batch processing. 
+### Cache Management
+Efficiently manage local cache and dump storage:
 
-We're investigating the best options to reduce these errors, such as setting the right append parameters and testing uploads as different formats (GeoJson, FGDB, Geopackage). This will require extensive testing. Recently, we've had the most success uploading in gpkg format in batches of 500,000 (settings in your .env file can be changed).
+```bash
+# List all cached data with metadata
+o2agol cache-list
+
+# Clear cache by country or release
+o2agol cache-clear --country afg
+o2agol cache-clear --release 2025-07-23.0
+
+# Force fresh download (replaces existing)
+o2agol overture-dump buildings --country afg --force-download
+```
 
 ### Troubleshooting
-- Validation errors: Re-download with `--force-download`
-- Memory errors: Reduce `DUMP_MAX_MEMORY` or use `--limit`
-- Disk space: Use `o2agol list-dumps` to check space usage
+- **Validation errors**: Use `--force-download` to refresh cached data
+- **Memory errors**: Reduce `DUMP_MAX_MEMORY` environment variable or use `--limit` for testing
+- **Storage issues**: Use `o2agol cache-list` to monitor disk usage
+- **Performance**: Use `--use-bbox` for development, `--use-divisions` for production accuracy
 
-## Planned for future
-- More testing for best way of appending large datasets (>8 million).
-- More transformation options for users, including having relevant fields properly transformed.
-- Interactive CLI for easier downloading.
-- Download larger dumps, such as by region or entire global dump by theme.
+## Future Enhancements
+- **Advanced Transformations**: Enhanced field mapping and data transformation capabilities
+- **Regional Processing**: Support for full Overture theme dumps
+- **Interactive CLI**: Guided interface for a better user experience
+- **Additional Output Formats**: Support for Shapefile, CSV, and other common formats
+- **Cloud Integration**: Native support for cloud storage backends (S3, Azure Blob, GCS)
 
 
 ## Sources

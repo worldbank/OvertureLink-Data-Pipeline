@@ -1,16 +1,27 @@
+"""
+Transformer - Data Schema Normalization and Transformation
+
+Handles field mapping, geometry normalization, and metadata enrichment.
+Integrates proven transformation logic from the existing pipeline.
+"""
+
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Literal, Optional, Union
+from datetime import datetime
+from typing import Any, Literal, Optional
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely.wkb as _swkb
+from shapely.geometry import MultiPolygon
 from shapely.geometry.base import BaseGeometry
 
+from ..domain.models import Country, Query
 
+# Constants for AGOL compatibility
 AGOL_STRING_MAX = 255  # safe default for text fields
 
 # AGOL reserved keywords and field name improvements
@@ -78,8 +89,117 @@ FIELD_IMPROVEMENTS = {
     'construction_year': 'year_built'
 }
 
+# Preferred column order for publishing
+PREFERRED_ORDER = [
+    "id",
+    "name",  
+    "road_class", "road_type",
+    "building_class", "building_type", "height_m", "floors",
+    "feature_type", "name_primary", "name_common",
+    "category_primary", "category_alternate",
+    "address_full", "address_locality", "address_country",
+    "website", "email", "phone",
+]
+
+
+class Transformer:
+    """
+    Data transformation and schema normalization for AGOL compatibility.
+    
+    Handles field mapping, geometry validation, stable ID retention,
+    and metadata enrichment for downstream publishing or export.
+    """
+    
+    def __init__(self, query: Query):
+        """
+        Initialize transformer with query configuration.
+        
+        Args:
+            query: Query configuration containing field mappings and metadata
+        """
+        self.query = query
+        
+    def normalize(self, df: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        """
+        Apply field mapping, geometry normalization, and stable ID retention.
+        
+        Args:
+            df: Raw GeoDataFrame from data source
+            
+        Returns:
+            Normalized GeoDataFrame ready for publishing/export
+        """
+        if df.empty:
+            logging.warning("Empty GeoDataFrame provided for transformation")
+            return df
+            
+        # Determine layer type from query name for schema normalization
+        layer_type = self._get_layer_type()
+        
+        logging.info(f"Normalizing schema for {layer_type} ({len(df):,} features)")
+        
+        # Apply the full schema normalization pipeline
+        normalized_gdf = normalize_schema(df, layer_type)
+        
+        logging.info(f"Schema normalization completed: {len(normalized_gdf):,} features processed")
+        return normalized_gdf
+        
+    def add_metadata(self, df: gpd.GeoDataFrame, country: Country) -> gpd.GeoDataFrame:
+        """
+        Add metadata fields like titles, descriptions, timestamps.
+        
+        Args:
+            df: Normalized GeoDataFrame
+            country: Country information for metadata context
+            
+        Returns:
+            GeoDataFrame enriched with metadata
+        """
+        if df.empty:
+            return df
+            
+        result_df = df.copy()
+        
+        # Add processing metadata
+        result_df['processed_date'] = datetime.now().isoformat()
+        result_df['country_iso3'] = country.iso3
+        result_df['country_name'] = country.name
+        
+        # Add query-specific metadata if available
+        if hasattr(self.query, 'sector_title') and self.query.sector_title:
+            result_df['data_sector'] = self.query.sector_title
+            
+        logging.debug(f"Added metadata fields to {len(result_df):,} features")
+        return result_df
+        
+    def _get_layer_type(self) -> Literal["roads", "buildings", "education", "health", "markets", "places"]:
+        """
+        Determine layer type from query configuration for schema normalization.
+        
+        Returns:
+            Layer type for schema normalization
+        """
+        query_name = self.query.name.lower()
+        
+        if 'road' in query_name or self.query.theme == 'transportation':
+            return 'roads'
+        elif 'building' in query_name or self.query.theme == 'buildings':
+            return 'buildings'
+        elif query_name in ['education', 'health', 'markets']:
+            return query_name  # type: ignore[return-value]
+        elif 'place' in query_name or self.query.theme == 'places':
+            return 'places'
+        else:
+            # Default to places for unknown types
+            return 'places'
+
+
+# ============================================================================
+# Core transformation functions
+# ============================================================================
 
 def _force_2d(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry]:
+    """Force geometry to 2D for AGOL compatibility."""
     if geom is None:
         return None
     try:
@@ -89,11 +209,28 @@ def _force_2d(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry]:
 
 
 def _make_valid_if_needed(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry]:
+    """Make invalid geometries valid using buffer(0) technique."""
     if geom is None:
         return None
     try:
         return geom if geom.is_valid else geom.buffer(0)
     except Exception:
+        return geom
+
+def _preserve_simple_polygon(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry]:
+    """
+    If a geometry is a MultiPolygon with exactly one part, return that single Polygon.
+    Otherwise, return the geometry unchanged.
+    Keeps valid Polygons as Polygon (avoids everything becoming MultiPolygon).
+    """
+    if geom is None:
+        return None
+    try:
+        if isinstance(geom, MultiPolygon) and len(geom.geoms) == 1:
+            return geom.geoms[0]
+        return geom
+    except Exception:
+        # If anything odd happens, fall back to the original geometry
         return geom
 
 
@@ -102,23 +239,35 @@ def enforce_geometry_rules(
     expected: Literal["points", "lines", "polygons"],
     validate_polygons: bool = True
 ) -> gpd.GeoDataFrame:
+    """Enforce geometry rules for AGOL compatibility."""
+    # Ensure WGS84 coordinate system
     if gdf.crs is None or gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(4326)
+        
+    # Remove empty or null geometries
     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notnull()].copy()
+    
+    # Force 2D geometries
     gdf.geometry = gdf.geometry.apply(_force_2d)
+    
+    # Validate polygons if requested
     if expected == "polygons" and validate_polygons:
         invalid = ~gdf.geometry.is_valid
         if invalid.any():
             gdf.loc[invalid, "geometry"] = gdf.loc[invalid, "geometry"].apply(_make_valid_if_needed)
+    
+    # Filter by expected geometry family
     fam = {
         "points": {"Point", "MultiPoint"},
         "lines": {"LineString", "MultiLineString"},
         "polygons": {"Polygon", "MultiPolygon"},
     }[expected]
+    
     bad = ~gdf.geometry.geom_type.isin(fam)
     if bad.any():
         logging.warning("Dropping %d features not matching expected geometry family=%s", int(bad.sum()), expected)
         gdf = gdf.loc[~bad].copy()
+        
     return gdf
 
 
@@ -153,30 +302,22 @@ def sanitize_field_names(gdf: gpd.GeoDataFrame, layer_type: str = "generic") -> 
 
 
 def _clip_strings(series: pd.Series, max_len: int = AGOL_STRING_MAX) -> pd.Series:
+    """Clip string values to maximum length for AGOL compatibility."""
     if series.dtype != "object":
         return series
     return series.apply(lambda v: None if (v is None or pd.isna(v)) else str(v)[:max_len])
 
 
-PREFERRED_ORDER = [
-    "id",
-    "road_class", "road_type",
-    "building_class", "building_type", "height_m", "floors",
-    "feature_type", "name_primary", "name_common",
-    "category_primary", "category_alternate",
-    "address_full", "address_locality", "address_country",
-    "website", "email", "phone",
-]
-
-
 def order_columns_for_publish(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Order columns in preferred sequence for publishing."""
     cols = [c for c in PREFERRED_ORDER if c in gdf.columns and c != "geometry"]
     rest = [c for c in gdf.columns if c not in cols and c != "geometry"]
     return gpd.GeoDataFrame(gdf[cols + rest + ["geometry"]], geometry="geometry", crs=gdf.crs)
 
 
 def normalize_schema(
-    gdf: gpd.GeoDataFrame, layer: Literal["roads", "buildings", "education", "health", "markets", "places"]
+    gdf: gpd.GeoDataFrame, 
+    layer: Literal["roads", "buildings", "education", "health", "markets", "places"]
 ) -> gpd.GeoDataFrame:
     """
     Normalize Overture data schema to AGOL-compatible flat structure.
@@ -214,8 +355,6 @@ def normalize_schema(
     # Final data type cleanup
     result_gdf = _finalize_data_types(result_gdf)
     
-    logging.info(f"Schema normalization completed: {len(result_gdf):,} features processed")
-    
     return result_gdf
 
 
@@ -249,7 +388,7 @@ def _clean_value_recursive(value: Any) -> Any:
             return value.tolist()
         elif isinstance(value, dict):
             return {k: _clean_value_recursive(v) for k, v in value.items()}
-        elif isinstance(value, (list, tuple)):
+        elif isinstance(value, list | tuple):
             return [_clean_value_recursive(item) for item in value]
         else:
             return value
@@ -257,6 +396,11 @@ def _clean_value_recursive(value: Any) -> Any:
         # If cleaning fails, convert to string
         return str(value) if value is not None else None
 
+# =====================================================================
+# Schema normalization
+# The three functions below normalize the schema for Overture's
+# three types: roads, buildings, and places
+# =====================================================================
 
 def _normalize_roads_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
@@ -266,6 +410,9 @@ def _normalize_roads_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
     result_gdf = gdf[["id", "geometry"]].copy()
     
+    if "name" in gdf.columns:
+        result_gdf["name"] = gdf["name"].astype(str)
+    
     # Add basic classification fields
     if "class" in gdf.columns:
         result_gdf["road_class"] = gdf["class"].astype(str)
@@ -273,7 +420,7 @@ def _normalize_roads_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if "subtype" in gdf.columns:
         result_gdf["road_type"] = gdf["subtype"].astype(str)
     
-    # Flatten names field
+    # Flatten names field (preserves both original and flattened fields)
     if "names" in gdf.columns:
         names_data = _flatten_names_field(gdf["names"])
         result_gdf = pd.concat([result_gdf, names_data], axis=1)
@@ -302,6 +449,9 @@ def _normalize_buildings_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
     result_gdf = gdf[["id", "geometry"]].copy()
     
+    if "name" in gdf.columns:
+        result_gdf["name"] = gdf["name"].astype(str)
+    
     # Add building classification
     if "class" in gdf.columns:
         result_gdf["building_class"] = gdf["class"].astype(str)
@@ -309,7 +459,7 @@ def _normalize_buildings_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     if "subtype" in gdf.columns:
         result_gdf["building_type"] = gdf["subtype"].astype(str)
     
-    # Flatten names field if present
+    # Flatten names field if present (preserves both original and flattened fields)
     if "names" in gdf.columns:
         names_data = _flatten_names_field(gdf["names"])
         result_gdf = pd.concat([result_gdf, names_data], axis=1)
@@ -325,6 +475,10 @@ def _normalize_buildings_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     
     # Apply transform helpers before return
     result_gdf = enforce_geometry_rules(result_gdf, expected="polygons", validate_polygons=True)
+
+    # Preserve simple Polygons as Polygon (avoid coercing everything to MultiPolygon)
+    result_gdf.geometry = result_gdf.geometry.apply(_preserve_simple_polygon)
+    
     # clip long strings
     for col in result_gdf.columns:
         if col != "geometry":
@@ -342,11 +496,14 @@ def _normalize_places_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
     result_gdf = gdf[["id", "geometry"]].copy()
     
+    if "name" in gdf.columns:
+        result_gdf["name"] = gdf["name"].astype(str)
+    
     # Add source type if available (distinguishes places from buildings)
     if "source_type" in gdf.columns:
         result_gdf["feature_type"] = gdf["source_type"].astype(str)
     
-    # Flatten names field
+    # Flatten names field (preserves both original and flattened fields)
     if "names" in gdf.columns:
         names_data = _flatten_names_field(gdf["names"])
         result_gdf = pd.concat([result_gdf, names_data], axis=1)
@@ -394,7 +551,7 @@ def _flatten_names_field(names_series: pd.Series) -> pd.DataFrame:
     From: {"primary": "Main St", "common": {"en": "Main Street"}, "rules": [...]}
     To: name_primary, name_common columns
     """
-    result_data = {
+    result_data: dict[str, list[Optional[str]]] = {
         "name_primary": [],
         "name_common": []
     }
@@ -414,7 +571,7 @@ def _flatten_categories_field(categories_series: pd.Series) -> pd.DataFrame:
     From: {"primary": "restaurant", "alternate": ["fast_food", "cafe"]}
     To: category_primary, category_alternate columns
     """
-    result_data = {
+    result_data: dict[str, list[Optional[str]]] = {
         "category_primary": [],
         "category_alternate": []
     }
@@ -434,7 +591,7 @@ def _flatten_addresses_field(addresses_series: pd.Series) -> pd.DataFrame:
     From: [{"freeform": "123 Main St", "locality": "City", "country": "US"}]
     To: address_full, address_locality, address_country columns  
     """
-    result_data = {
+    result_data: dict[str, list[Optional[str]]] = {
         "address_full": [],
         "address_locality": [],
         "address_country": []
@@ -448,6 +605,10 @@ def _flatten_addresses_field(addresses_series: pd.Series) -> pd.DataFrame:
     
     return pd.DataFrame(result_data, index=addresses_series.index)
 
+
+# ============================================================================
+# Helper functions for field extraction and data type conversion
+# ============================================================================
 
 def _extract_names_from_value(names_value: Any) -> tuple[Optional[str], Optional[str]]:
     """Extract primary and common names from a names value."""
@@ -560,17 +721,17 @@ def _safe_string(value: Any, max_length: int = 255) -> Optional[str]:
     try:
         str_value = str(value)
         return str_value[:max_length] if len(str_value) > max_length else str_value
-    except:
+    except Exception:
         return None
 
 
 def _safe_numeric_convert(series: pd.Series, target_type: type) -> pd.Series:
     """Safely convert a series to numeric type, handling nulls and invalid values."""
-    def convert_value(x):
+    def convert_value(x: Any) -> Any:
         if x is None or pd.isna(x):
             return None
         try:
-            if target_type == int:
+            if target_type is int:
                 return int(float(x))  # Convert to float first to handle string numbers
             else:
                 return target_type(x)

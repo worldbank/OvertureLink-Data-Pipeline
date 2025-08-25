@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import shutil
@@ -156,7 +157,7 @@ def cleanup_current_pid() -> None:
 
 
 def register_cleanup_handlers() -> None:
-    """Register signal handlers for graceful cleanup on interruption."""
+    """Register signal handlers and atexit handler for cleanup."""
     def signal_handler(signum: int, frame) -> None:
         logging.info(f"Received signal {signum}, cleaning up temp files...")
         cleanup_current_pid()
@@ -164,6 +165,9 @@ def register_cleanup_handlers() -> None:
         
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Register atexit handler for normal process termination
+    atexit.register(cleanup_current_pid)
 
 
 def ensure_temp_structure() -> None:
