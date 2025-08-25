@@ -1,31 +1,80 @@
-import json
 import logging
-import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import typer
-
-# Note: We use Optional[T] instead of T | None (PEP 604) throughout this file
-# because Typer 0.12.3 doesn't support the newer union syntax in Annotated types.
-# The UP045 ruff rule is disabled in pyproject.toml to prevent automatic conversion.
 import yaml
 from dotenv import load_dotenv
 
 # Load environment variables BEFORE importing local modules that use them
 load_dotenv()
 
-from .cleanup import full_cleanup_check, register_cleanup_handlers
-from .config.settings import Config, PipelineLogger, LogContext
-from .config_loader import load_config, get_available_queries, validate_query_exists
-# Legacy imports - use compat module for backward compatibility during transition
-from .compat.duck import fetch_gdf
-from .compat.publish import publish_or_update
-from .domain.enums import StagingFormat
+from .cleanup import full_cleanup_check, register_cleanup_handlers, cleanup_current_pid
+from .config.settings import Config, PipelineLogger
+from .config_loader import get_available_queries, load_config, validate_query_exists
+from .domain.enums import ClipStrategy, StagingFormat
+from .domain.models import Country, Query, RunOptions
+from .pipeline.export import Exporter, generate_export_filename
+from .pipeline.publish import FeatureLayerManager
+from .pipeline.source import OvertureSource
 
 app = typer.Typer(help="Overture Maps Pipeline: Source -> Transform -> Publish/Export")
+
+
+# Helper functions to replace compat module functionality
+def fetch_data(
+    cfg: dict,
+    query_config: Query,
+    country_config: Country,
+    use_divisions: bool = True,
+    limit: Optional[int] = None
+):
+    """
+    Fetch data using the new OvertureSource architecture.
+    Replaces the old fetch_gdf compat function.
+    """
+    try:
+        # Create run options
+        run_options = RunOptions(
+            limit=limit,
+            use_bbox=not use_divisions,
+            verbose=True,
+            dry_run=False,
+            log_to_file=False
+        )
+        
+        # Create source and fetch data
+        source = OvertureSource(cfg, run_options)
+        clip_strategy = ClipStrategy.DIVISIONS if use_divisions else ClipStrategy.BBOX
+        
+        result = source.read(query_config, country_config, clip_strategy, raw=False)
+        source.close()
+        return result
+        
+    except Exception as e:
+        logging.error(f"Failed to fetch data: {e}")
+        raise
+
+
+def publish_to_agol(gdf, metadata: dict, mode: str, gis) -> str:
+    """
+    Publish GeoDataFrame to ArcGIS Online using GeoPackage staging.
+    Uses publish_multi_layer_service for consistent 45x faster uploads.
+    """
+    try:
+        from .domain.enums import Mode
+        publish_mode = Mode(mode)
+        manager = FeatureLayerManager(gis, publish_mode)
+        
+        service_name = metadata.get('title', 'default_layer')
+        return manager.publish_multi_layer_service(gdf, service_name, metadata, publish_mode)
+        
+    except Exception as e:
+        logging.error(f"Failed to publish to AGOL: {e}")
+        raise
 
 
 def setup_logging(verbose: bool, target_name: Optional[str] = None, mode: Optional[str] = None, enable_file_logging: bool = False):
@@ -372,8 +421,15 @@ def process_target(
     if country and iso2:
         logging.warning(f"Both --country ({country}) and --iso2 ({iso2}) provided. Using --country for global config, --iso2 for selector override.")
     
-    # Load unified configuration with optional country override
-    cfg = load_pipeline_config(config, country)
+    # Load configuration using new architecture
+    config_dict, run_options, query_config, country_config = load_config(
+        query=target_name,
+        country=country or iso2,
+        config_path=config
+    )
+    
+    # For compatibility with old cfg usage
+    cfg = config_dict
     
     # Log configuration status
     logging.info(f"Connected to ArcGIS as: {cfg['gis'].users.me.username}")
@@ -413,27 +469,8 @@ def process_target(
         else:
             logging.info(f"Applying bounding box spatial filter (bbox_only={bbox_only})")
         
-        # Create configuration object for fetch_gdf
-        class ConfigAdapter:
-            def __init__(self, cfg_dict, selector_dict, target_dict, target_name):
-                self.yaml_config = cfg_dict['yaml']
-                self.secure_config = cfg_dict['secure']
-                self.overture_config = cfg_dict['overture']  # YAML-based config
-                # Store selector as a simple object with the dict as __dict__ 
-                self.selector = type('SelectorConfig', (), {})()
-                if selector_dict:
-                    self.selector.__dict__.update(selector_dict)
-                
-                # Create target config with instance attributes (not class attributes)
-                target_config_instance = type('TargetConfig', (), {})()
-                for key, value in target_dict.items():
-                    setattr(target_config_instance, key, value)
-                self.targets = {target_name: target_config_instance}
-                
-        config_adapter = ConfigAdapter(cfg, selector, target_config, target_name)
-        
-        # Execute data retrieval with specified parameters
-        data_result = fetch_gdf(config_adapter, target_name, limit=limit, bbox_only=bbox_only, use_divisions=use_divisions)
+        # Execute data retrieval using new architecture
+        data_result = fetch_data(cfg, query_config, country_config, use_divisions, limit)
         
         # Handle dual query results (dict) vs single query (GeoDataFrame)
         is_dual_query = isinstance(data_result, dict)
@@ -508,36 +545,11 @@ def process_target(
         logging.info("DATA PUBLICATION PHASE")
         logging.info("=" * 50)
         
-        # Create target config adapter for publish function
+        # Log template usage for publish function
         if cfg.get('config_format') == 'template':
-            # Use template metadata with dynamic variables
             template_metadata = cfg['template'].get_target_metadata(target_name)
-            
-            # Create AGOL config with essential metadata
-            agol_config_dict = {
-                'item_title': template_metadata.item_title,
-                'snippet': template_metadata.snippet,
-                'description': template_metadata.description,
-                'service_name': template_metadata.service_name,
-                'tags': template_metadata.tags,
-                'access_information': template_metadata.access_information,
-                'license_info': template_metadata.license_info,
-                'upsert_key': template_metadata.upsert_key,
-                'item_id': template_metadata.item_id
-            }
-            
-            target_adapter = type('TargetConfig', (), {
-                'agol': type('AGOLConfig', (), agol_config_dict)()
-            })()
-            
             logging.info(f"Using template metadata: {template_metadata.item_title}")
             
-        else:
-            # Legacy config adapter
-            target_adapter = type('TargetConfig', (), {
-                'agol': type('AGOLConfig', (), target_config.get('agol', {}))()
-            })()
-        
         # Choose appropriate publishing method
         # Use parameters from CLI for flexibility in deployment
         if is_dual_query:
@@ -564,7 +576,15 @@ def process_target(
             )
             total_published = sum(len(gdf) for gdf in normalized_data.values())
         else:
-            result = publish_or_update(gdf, target_adapter, mode, use_async, use_analyze, staging_format)
+            # Single-layer publishing using new architecture
+            config = Config()
+            gis = config.create_gis_connection()
+            
+            # Create metadata from configuration
+            from .config_loader import format_metadata_from_config
+            metadata = format_metadata_from_config(config_dict, query_config, country_config)
+            
+            result = publish_to_agol(gdf, metadata, mode, gis)
             total_published = len(gdf)
         
         # Generate execution summary for audit and monitoring
@@ -692,8 +712,15 @@ def process_target_for_export(
     if country and iso2:
         logging.warning(f"Both --country ({country}) and --iso2 ({iso2}) provided. Using --country for global config, --iso2 for selector override.")
     
-    # Load unified configuration with optional country override
-    cfg = load_pipeline_config(config, country)
+    # Load configuration using new architecture
+    config_dict, run_options, query_config, country_config = load_config(
+        query=target_name,
+        country=country or iso2,
+        config_path=config
+    )
+    
+    # For compatibility with old cfg usage
+    cfg = config_dict
     
     # Log configuration status
     logging.info(f"Connected to ArcGIS as: {cfg['gis'].users.me.username}")
@@ -733,27 +760,8 @@ def process_target_for_export(
         else:
             logging.info(f"Applying bounding box spatial filter (bbox_only={bbox_only})")
         
-        # Create configuration object for fetch_gdf
-        class ConfigAdapter:
-            def __init__(self, cfg_dict, selector_dict, target_dict, target_name):
-                self.yaml_config = cfg_dict['yaml']
-                self.secure_config = cfg_dict['secure']
-                self.overture_config = cfg_dict['overture']  # YAML-based config
-                # Store selector as a simple object with the dict as __dict__ 
-                self.selector = type('SelectorConfig', (), {})()
-                if selector_dict:
-                    self.selector.__dict__.update(selector_dict)
-                
-                # Create target config with instance attributes (not class attributes)
-                target_config_instance = type('TargetConfig', (), {})()
-                for key, value in target_dict.items():
-                    setattr(target_config_instance, key, value)
-                self.targets = {target_name: target_config_instance}
-                
-        config_adapter = ConfigAdapter(cfg, selector, target_config, target_name)
-        
-        # Execute data retrieval with specified parameters
-        data_result = fetch_gdf(config_adapter, target_name, limit=limit, bbox_only=bbox_only, use_divisions=use_divisions)
+        # Execute data retrieval using new architecture
+        data_result = fetch_data(cfg, query_config, country_config, use_divisions, limit)
         
         # Handle dual query results (dict) vs single query (GeoDataFrame)
         is_dual_query = isinstance(data_result, dict)
@@ -772,7 +780,6 @@ def process_target_for_export(
         if raw_export:
             # Export raw Overture data without transformation
             logging.info("Exporting raw Overture data (no AGOL transformations)")
-            from .pipeline.export import Exporter
             export_data(
                 data=data_result,
                 output_path=output_path,
@@ -797,7 +804,6 @@ def process_target_for_export(
                 normalized_gdf = transformer.normalize(data_result)
                 normalized_data = transformer.add_metadata(normalized_gdf, country_config)
             
-            from .pipeline.export import Exporter
             export_data(
                 data=normalized_data,
                 output_path=output_path,
@@ -859,10 +865,6 @@ def arcgis_upload(
             o2agol arcgis-upload roads --country af
             o2agol arcgis-upload education --country pak --limit 100
             o2agol arcgis-upload buildings --country ind --dry-run
-            
-        With development options:
-            o2agol arcgis-upload health --country afg --use-bbox --limit 50
-            
         Custom config file:
             o2agol arcgis-upload my_custom_query -c configs/custom.yml --dry-run
     """
@@ -895,10 +897,10 @@ def arcgis_upload(
         
         # Import pipeline components
         from .config.settings import Config
+        from .domain.enums import ClipStrategy, Mode
+        from .pipeline.publish import FeatureLayerManager
         from .pipeline.source import OvertureSource
         from .pipeline.transform import Transformer
-        from .pipeline.publish import FeatureLayerManager
-        from .domain.enums import Mode, ClipStrategy
         
         # Load configuration using new typed system
         config_dict, run_options, query_config, country_config = load_config(
@@ -964,7 +966,6 @@ def arcgis_upload(
         logging.info(f"Publishing to ArcGIS Online in {mode} mode")
         
         # Load AGOL configuration
-        from .config.settings import Config
         agol_config = Config()
         gis = agol_config.create_gis_connection()
         
@@ -984,10 +985,10 @@ def arcgis_upload(
                 metadata=metadata
             )
         else:
-            # Single-layer service (roads, buildings, places)
-            item_id = publisher.upsert(
-                df=transformed_data,
-                layer_name=f"{country_config.iso3.lower()}_{query_config.name}",
+            # Single-layer service (roads, buildings, places) - using GeoPackage staging
+            item_id = publisher.publish_multi_layer_service(
+                layer_data=transformed_data,
+                service_name=f"{country_config.iso3.lower()}_{query_config.name}",
                 metadata=metadata
             )
         
@@ -996,6 +997,7 @@ def arcgis_upload(
             print(f"Published item ID: {item_id}")
         else:
             logging.error("Failed to publish to AGOL")
+            cleanup_current_pid()
             raise typer.Exit(1)
             
     except Exception as e:
@@ -1003,14 +1005,18 @@ def arcgis_upload(
         if verbose:
             import traceback
             logging.error(f"Full traceback: {traceback.format_exc()}")
+        cleanup_current_pid()
         raise typer.Exit(1)
+    finally:
+        # Ensure cleanup happens on successful completion too
+        cleanup_current_pid()
 
 
 @app.command("export")
 def export_data_command(
     query: Annotated[str, typer.Argument(help="Query type to execute. Use 'list-queries' command to see available options.")],
     output_path: Annotated[Optional[str], typer.Argument(help="Output file path (optional - will auto-generate if not provided)")] = None,
-    format: Annotated[str, typer.Option("--format", "-f", help="Export format: geojson, gpkg, fgdb")] = "geojson",
+    format: Annotated[str, typer.Option("--format", "-f", help="Export format: geojson, gpkg, fgdb")] = "gpkg",
     raw: Annotated[bool, typer.Option("--raw", help="Export raw Overture data without AGOL transformations")] = False,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "src/o2agol/data/agol_metadata.yml",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
@@ -1032,8 +1038,8 @@ def export_data_command(
     Standard queries include: roads, buildings, places, education, health, markets
     
     Examples:
-        o2agol export roads --country afg                      # GeoJSON (default)
-        o2agol export roads --country afg --format gpkg        # GeoPackage
+        o2agol export roads --country afg                      # GeoPackage 
+        o2agol export roads --country afg --format geojson     # GeoPackage (default)
         o2agol export places roads.gpkg --country afg --raw    # Raw data with custom filename
         o2agol export education --country pak --format fgdb    # Multi-layer FGDB
     """
@@ -1067,12 +1073,12 @@ def export_data_command(
         setup_logging(verbose, query, "export", log_to_file)
         
         # Import pipeline components
-        from .config.settings import Config
+        from pathlib import Path
+
+        from .domain.enums import ClipStrategy, ExportFormat
+        from .pipeline.export import Exporter, generate_export_filename
         from .pipeline.source import OvertureSource
         from .pipeline.transform import Transformer
-        from .pipeline.export import Exporter, generate_export_filename
-        from .domain.enums import ClipStrategy, ExportFormat
-        from pathlib import Path
         
         # Load configuration using new typed system
         config_dict, run_options, query_config, country_config = load_config(
@@ -1172,7 +1178,11 @@ def export_data_command(
         if verbose:
             import traceback
             logging.error(f"Full traceback: {traceback.format_exc()}")
+        cleanup_current_pid()
         raise typer.Exit(1)
+    finally:
+        # Ensure cleanup happens on successful completion too
+        cleanup_current_pid()
 
 
 @app.command("list-queries")
@@ -1192,7 +1202,7 @@ def list_queries(
         queries = get_available_queries()
         
         if not queries:
-            typer.echo(f"WARNING: No queries found")
+            typer.echo("WARNING: No queries found")
             raise typer.Exit(1)
         
         # Load queries with detailed information
@@ -1253,8 +1263,7 @@ def overture_dump(
     use_local: Annotated[bool, typer.Option("--use-local/--use-s3", help="Use local dump if available")] = True,
     force_download: Annotated[bool, typer.Option("--force-download", help="Force re-download even if dump exists")] = False,
     release: Annotated[str, typer.Option("--release", help="Overture release version")] = "2025-07-23.0",
-    output_format: Annotated[str, typer.Option("--format", help="Output format: agol or geojson")] = "agol",
-    output_path: Annotated[Optional[str], typer.Option("--output", help="Output GeoJSON file path (for geojson format)")] = None,
+    staging_format: Annotated[str, typer.Option("--format", help="Staging format for AGOL upload: geojson, gpkg, or fgdb")] = "gpkg",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
@@ -1262,7 +1271,6 @@ def overture_dump(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     # Cache optimization flags
     use_world_bank: Annotated[bool, typer.Option("--world-bank/--overture-divisions", help="Use World Bank boundaries (default: enabled)")] = True,
-    staging_format: Annotated[StagingFormat, typer.Option("--staging-format", help="Format for staging data during AGOL uploads (geojson or gpkg)")] = StagingFormat.GEOJSON,
     use_async: Annotated[bool, typer.Option("--async", help="Use async append for large datasets")] = False,
     use_analyze: Annotated[bool, typer.Option("--analyze", help="Analyze uploaded data before append")] = False,
 ):
@@ -1310,18 +1318,9 @@ def overture_dump(
         typer.echo(f"ERROR: --mode must be one of: {', '.join(valid_modes)}", err=True)
         raise typer.Exit(1)
     
-    # Validate output format
-    if output_format not in ["agol", "geojson"]:
-        typer.echo("ERROR: --format must be 'agol' or 'geojson'", err=True)
-        raise typer.Exit(1)
-    
-    # Validate parameter combinations
-    if output_format == "geojson" and dry_run:
-        typer.echo("ERROR: --dry-run is not supported with GeoJSON export", err=True)
-        raise typer.Exit(1)
-    
-    if output_format == "agol" and output_path:
-        typer.echo("ERROR: --output is only supported with --format geojson", err=True)
+    # Validate staging format
+    if staging_format not in ["geojson", "gpkg", "fgdb"]:
+        typer.echo("ERROR: --format must be 'geojson', 'gpkg', or 'fgdb'", err=True)
         raise typer.Exit(1)
     
     if not country:
@@ -1333,8 +1332,7 @@ def overture_dump(
     setup_logging(verbose, query, log_mode, log_to_file)
     
     # Initialize comprehensive timing
-    import time
-    from datetime import datetime, timedelta
+    from datetime import datetime
     
     def format_duration(seconds: float) -> str:
         """Format duration in human-readable format."""
@@ -1352,8 +1350,8 @@ def overture_dump(
     pipeline_logger = PipelineLogger(base_logger)
     
     # Capture original command for reference
-    import sys
     import os
+    import sys
     
     # Extract just the command name and arguments, not the full file path
     if sys.argv and sys.argv[0]:
@@ -1371,7 +1369,7 @@ def overture_dump(
     
     # Start overall timing
     operation_start_time = time.time()
-    operation_mode = "AGOL upload" if output_format == "agol" else "GeoJSON export" if output_format == "geojson" else "overture-dump"
+    operation_mode = f"AGOL upload (staging as {staging_format.upper()})"
     logging.info(f"Starting {operation_mode} operation: {query} for {country}")
     logging.info(f"Execution timestamp: {datetime.now()}")
 
@@ -1401,9 +1399,8 @@ def overture_dump(
     pipeline_logger.info(f"Configuration: {country_info.name} ({country_info.iso3}) | Query: {query} | Release: {release}")
     
     # Initialize new pipeline architecture components
-    from .pipeline.source import OvertureSource
-    from .domain.models import RunOptions
     from .domain.enums import ClipStrategy
+    from .pipeline.source import OvertureSource
     
     # Update runtime options from CLI parameters (merge with loaded options)
     run_options.clip = ClipStrategy.DIVISIONS if use_divisions else ClipStrategy.BBOX
@@ -1416,7 +1413,7 @@ def overture_dump(
     # Configuration phase complete
     logging.info(f"Cache storage location: {source._cache_dir}")
     logging.info(f"Dump storage location: {source._dump_base_path}")
-    logging.info(f"Using country-specific caching approach")
+    logging.info("Using country-specific caching approach")
     logging.info(f"Cache enabled: {source._enable_cache}")
     logging.info(f"Local dumps enabled: {source._use_local_dumps}")
     
@@ -1526,7 +1523,8 @@ def overture_dump(
     # Process query using OvertureSource with cache->dump->S3 fallback
     try:
         from .config.countries import CountryRegistry
-        from .domain.models import Query as DomainQuery, Country as DomainCountry
+        from .domain.models import Country as DomainCountry
+        from .domain.models import Query as DomainQuery
         
         # Resolve country
         country_info = CountryRegistry.get_country(country)
@@ -1608,88 +1606,55 @@ def overture_dump(
             # === PHASE 3: OUTPUT ===
             phase4_start = time.time()
             pipeline_logger.info("")
-            pipeline_logger.phase("PHASE 3: AGOL PUBLISHING" if output_format == "agol" else "PHASE 3: GEOJSON EXPORT")
+            pipeline_logger.phase("PHASE 3: AGOL PUBLISHING")
+            pipeline_logger.info(f"Publishing to ArcGIS Online using {staging_format.upper()} staging")
             
-            # Output based on format
-            if output_format == "geojson":
-                if not output_path:
-                    output_path = generate_export_filename(query, country)
+            # Always publish to AGOL - overture-dump is for AGOL uploads only
+            if config_dict.get('config_format') == 'template':
+                # Use template metadata with dynamic variables
+                template_metadata = config_dict['template'].get_target_metadata(query)
+                pipeline_logger.info(f"Found existing service: {template_metadata.item_title}")
+            
+            # Use multi-layer publishing service (same as arcgis-upload command)
+            from .pipeline.publish import FeatureLayerManager
+            
+            # Create GIS connection and publisher
+            config_obj = Config()
+            gis = config_obj.create_gis_connection()
+            
+            # Map mode string to Mode enum
+            from .domain.enums import Mode
+            publish_mode = Mode(mode if mode != "auto" else "initial")
+            
+            publisher = FeatureLayerManager(gis, publish_mode)
+            
+            # Create metadata from configuration templates
+            from .config_loader import format_metadata_from_config
+            metadata = format_metadata_from_config(config_dict, query_config, country_config)
+            
+            # Use parameters from CLI for flexibility
+            result = publisher.publish_multi_layer_service(
+                layer_data=transformed_data,
+                service_name=f"{country_config.iso3.lower()}_{query_config.name}",
+                metadata=metadata,
+                staging_format=staging_format
+            )
+            
+            # publish_multi_layer_service returns the published item, not a dict
+            if result:
+                # Extract layer info for display
+                layers_info = []
+                for layer_name, layer_gdf in transformed_data.items():
+                    layer_type = "points" if "places" in layer_name else "polygons"
+                    layers_info.append(f"Updated layer {country_config.iso3.lower()}_{query}_{layer_type} ({len(layer_gdf):,} features)")
                 
-                pipeline_logger.info(f"Exporting to {output_path}")
-                # Use existing export_to_geojson which handles dict input
-                export_to_geojson(transformed_data, output_path, query)
-                pipeline_logger.info(f"Export complete: {output_path}")
+                for info in layers_info:
+                    pipeline_logger.info(info)
                 
-            else:  # agol format
-                # Create target configuration adapter (similar to single-theme approach)
-                target_config = config_dict.get('targets', {}).get(query, {})
-                if config_dict.get('config_format') == 'template':
-                    # Use template metadata with dynamic variables
-                    template_metadata = config_dict['template'].get_target_metadata(query)
-                    
-                    # Create AGOL config with essential metadata
-                    agol_config_dict = {
-                        'item_title': template_metadata.item_title,
-                        'snippet': template_metadata.snippet,
-                        'description': template_metadata.description,
-                        'service_name': template_metadata.service_name,
-                        'tags': template_metadata.tags,
-                        'access_information': template_metadata.access_information,
-                        'license_info': template_metadata.license_info,
-                        'upsert_key': template_metadata.upsert_key,
-                        'item_id': template_metadata.item_id
-                    }
-                    
-                    target_adapter = type('TargetConfig', (), {
-                        'agol': type('AGOLConfig', (), agol_config_dict)()
-                    })()
-                    
-                    pipeline_logger.info(f"Found existing service: {template_metadata.item_title}")
-                else:
-                    # Legacy config adapter
-                    target_adapter = type('TargetConfig', (), {
-                        'agol': type('AGOLConfig', (), target_config.get('agol', {}))()
-                    })()
-                
-                # Use multi-layer publishing service (same as arcgis-upload command)
-                from .pipeline.publish import FeatureLayerManager
-                
-                # Create GIS connection and publisher
-                config = Config()
-                gis = config.create_gis_connection()
-                
-                # Map mode string to Mode enum
-                from .domain.enums import Mode
-                publish_mode = Mode(mode if mode != "auto" else "initial")
-                
-                publisher = FeatureLayerManager(gis, publish_mode)
-                
-                # Create metadata from configuration templates
-                from .config_loader import format_metadata_from_config
-                metadata = format_metadata_from_config(config_dict, query_config, country_config)
-                
-                # Use parameters from CLI for flexibility
-                result = publisher.publish_multi_layer_service(
-                    layer_data=transformed_data,
-                    service_name=f"{country_config.iso3.lower()}_{query_config.name}",
-                    metadata=metadata
-                )
-                
-                # publish_multi_layer_service returns the published item, not a dict
-                if result:
-                    # Extract layer info for display
-                    layers_info = []
-                    for layer_name, layer_gdf in transformed_data.items():
-                        layer_type = "points" if "places" in layer_name else "polygons"
-                        layers_info.append(f"Updated layer {country_info.iso3.lower()}_{query}_{layer_type} ({len(layer_gdf):,} features)")
-                    
-                    for info in layers_info:
-                        pipeline_logger.info(info)
-                    
-                    pipeline_logger.info(f"Multi-layer service published with item ID: {result}")
-                else:
-                    pipeline_logger.info("Failed to publish service to ArcGIS Online")
-                    raise typer.Exit(1)
+                pipeline_logger.info(f"Multi-layer service published with item ID: {result}")
+            else:
+                pipeline_logger.info("Failed to publish service to ArcGIS Online")
+                raise typer.Exit(1)
             
             # End Phase 3 for dual-theme
             phase_times['output'] = time.time() - phase4_start
@@ -1728,45 +1693,44 @@ def overture_dump(
             # === PHASE 3: OUTPUT ===
             phase4_start = time.time()
             pipeline_logger.info("")
-            pipeline_logger.phase("PHASE 3: AGOL PUBLISHING" if output_format == "agol" else "PHASE 3: GEOJSON EXPORT")
+            pipeline_logger.phase("PHASE 3: AGOL PUBLISHING")
+            pipeline_logger.info(f"Publishing to ArcGIS Online using {staging_format.upper()} staging")
             
-            # Output based on format
-            if output_format == "geojson":
-                if not output_path:
-                    output_path = generate_export_filename(query, country)
+            # Always publish to AGOL - overture-dump is for AGOL uploads only
+            # Publish the already-transformed data directly to avoid duplicate processing
+            
+            from .domain.enums import Mode
+            from .pipeline.publish import FeatureLayerManager
+            
+            # Create GIS connection and publisher
+            config_obj = Config()
+            gis = config_obj.create_gis_connection()
+            
+            # Map mode string to Mode enum
+            publish_mode = Mode(mode if mode != "auto" else "initial")
+            publisher = FeatureLayerManager(gis, publish_mode)
+            
+            # Create metadata from configuration
+            from .config_loader import format_metadata_from_config
+            metadata = format_metadata_from_config(config_dict, query_config, country_config)
+            
+            # Publish using the already-transformed data
+            try:
+                result = publisher.publish_multi_layer_service(
+                    layer_data=gdf_transformed,
+                    service_name=f"{country_config.iso3.lower()}_{query_config.name}",
+                    metadata=metadata,
+                    staging_format=staging_format
+                )
                 
-                pipeline_logger.info(f"Exporting to {output_path}")
-                export_to_geojson(gdf_transformed, output_path, query)
-                pipeline_logger.info(f"Export complete: {output_path}")
-                
-            else:  # agol format
-                # Use the standard arcgis-upload pipeline to ensure consistency
-                # The cache has been validated and will be automatically used by OvertureSource
-                pipeline_logger.info("Processing cached data through standard AGOL pipeline")
-                
-                # Call arcgis-upload function directly with the same parameters
-                # arcgis-upload will use OvertureSource which automatically detects and uses cache
-                try:
-                    arcgis_upload(
-                        query=query,
-                        config=config,
-                        mode=mode,
-                        limit=limit,
-                        iso2=None,
-                        country=country,
-                        dry_run=dry_run,
-                        verbose=verbose,
-                        use_divisions=use_divisions,
-                        log_to_file=log_to_file,
-                        skip_cleanup=False,
-                        staging_format=staging_format,
-                        use_async=use_async,
-                        use_analyze=use_analyze
-                    )
-                    pipeline_logger.info("AGOL upload completed via standard pipeline")
-                except Exception as e:
-                    pipeline_logger.info(f"Failed to publish to ArcGIS Online: {e}")
+                if result:
+                    pipeline_logger.info(f"Published to AGOL with item ID: {result}")
+                else:
+                    logging.error("Failed to publish to ArcGIS Online")
                     raise typer.Exit(1)
+            except Exception as e:
+                logging.error(f"Failed to publish to ArcGIS Online: {e}")
+                raise typer.Exit(1)
             
             # End Phase 3 for single-theme
             phase_times['output'] = time.time() - phase4_start
@@ -1784,7 +1748,7 @@ def overture_dump(
             percentage = (phase_duration / total_duration) * 100 if total_duration > 0 else 0
             formatted_phase = phase_name.replace('_', ' ').title().replace('Data ', '').replace('Acquisition', 'Acquisition')
             if formatted_phase == 'Output':
-                formatted_phase = 'AGOL Publishing' if output_format == 'agol' else 'GeoJSON Export'
+                formatted_phase = 'AGOL Publishing'
             pipeline_logger.info(f"  {formatted_phase}: {format_duration(phase_duration)} ({percentage:.1f}%)")
     
     except Exception as e:
@@ -1798,10 +1762,13 @@ def overture_dump(
             logging.error("Completed phases:")
             for phase_name, phase_duration in phase_times.items():
                 logging.error(f"  {phase_name.replace('_', ' ').title()}: {format_duration(phase_duration)}")
+        cleanup_current_pid()
         raise typer.Exit(1)
     
     finally:
         source.close()
+        # Ensure cleanup happens on successful completion too
+        cleanup_current_pid()
 
 
 # Deprecated commands removed - dump management is now integrated into OvertureSource
@@ -1821,9 +1788,9 @@ def list_cache(
     """
     try:
         # Use OvertureSource for cache management (integrated dump manager functionality)
-        from .pipeline.source import OvertureSource
-        from .domain.models import RunOptions
         from .domain.enums import ClipStrategy
+        from .domain.models import RunOptions
+        from .pipeline.source import OvertureSource
         
         # Create minimal config for OvertureSource
         config_dict = {}
@@ -1894,9 +1861,9 @@ def clear_cache(
     """
     try:
         # Use OvertureSource for cache management (integrated dump manager functionality)
-        from .pipeline.source import OvertureSource
-        from .domain.models import RunOptions
         from .domain.enums import ClipStrategy
+        from .domain.models import RunOptions
+        from .pipeline.source import OvertureSource
         
         # Create minimal config for OvertureSource
         config_dict = {}

@@ -17,14 +17,14 @@ Environment Variables (AGOL_ standard):
     DUCKDB_THREADS: Number of threads for DuckDB
 """
 
+import hashlib
 import logging
 import os
-import hashlib
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Set, Dict
-from collections import deque
+from typing import Any, Optional
 
 from arcgis.gis import GIS
 from dotenv import load_dotenv
@@ -46,7 +46,7 @@ class LogEntry:
     message: str
     context: LogContext
     source: str  # Module/function origin
-    data: Optional[Dict[str, Any]] = None
+    data: Optional[dict[str, Any]] = None
     _hash: Optional[str] = None  # For deduplication
     
     def __post_init__(self):
@@ -63,7 +63,7 @@ class PipelineLogger:
         self.logger = base_logger
         self.window_size = window_size
         self.recent_hashes: deque = deque(maxlen=window_size)
-        self._message_counts: Dict[str, int] = {}
+        self._message_counts: dict[str, int] = {}
     
     def should_log(self, entry: LogEntry) -> bool:
         """Determine if message should be logged based on deduplication rules."""
@@ -72,7 +72,7 @@ class PipelineLogger:
             return False
         return True
     
-    def log(self, context: LogContext, message: str, source: str = "", data: Optional[Dict] = None):
+    def log(self, context: LogContext, message: str, source: str = "", data: Optional[dict] = None):
         """Context-aware logging with deduplication."""
         entry = LogEntry(message, context, source, data)
         
@@ -83,9 +83,7 @@ class PipelineLogger:
         self.recent_hashes.append(entry._hash)
         
         # Log at appropriate level based on context
-        if context in [LogContext.PHASE, LogContext.MILESTONE]:
-            self.logger.info(message)
-        elif context == LogContext.OPERATION:
+        if context in [LogContext.PHASE, LogContext.MILESTONE] or context == LogContext.OPERATION:
             self.logger.info(message)
         else:  # DEBUG
             self.logger.debug(message)
@@ -378,6 +376,7 @@ class Config:
         """Load Overture Maps configuration with sensible defaults."""
         base_url = os.getenv("OVERTURE_BASE_URL", "s3://overturemaps-us-west-2/release")
         release = os.getenv("OVERTURE_RELEASE", "2025-07-23.0")
+        logger.info(f"Config loading OVERTURE_RELEASE from env: {release}")
         s3_region = os.getenv("OVERTURE_S3_REGION", "us-west-2")
         
         try:

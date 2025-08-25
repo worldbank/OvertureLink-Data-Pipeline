@@ -10,10 +10,10 @@ import logging
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Union, Dict, Optional
+from typing import Optional
 
-import geopandas as gpd
 import fiona
+import geopandas as gpd
 
 from ..domain.enums import ExportFormat
 
@@ -53,7 +53,7 @@ class Exporter:
                 
     def write(
         self, 
-        data: Union[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame]], 
+        data: gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame], 
         base_name: str, 
         out_dir: Path, 
         multilayer: bool = False, 
@@ -104,7 +104,7 @@ class Exporter:
         
     def export_data(
         self,
-        data: Union[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame]],
+        data: gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame],
         output_path: str,
         target_name: str,
         export_format: str = "geojson",
@@ -222,7 +222,7 @@ class Exporter:
 
     def _export_to_geojson(
         self,
-        data: Union[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame]],
+        data: gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame],
         output_path: Path,
         target_name: str,
         raw_export: bool,
@@ -293,7 +293,7 @@ class Exporter:
 
     def _export_to_gpkg(
         self,
-        data: Union[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame]],
+        data: gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame],
         output_path: Path,
         target_name: str,
         raw_export: bool,
@@ -321,7 +321,7 @@ class Exporter:
 
     def _export_to_fgdb(
         self,
-        data: Union[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame]],
+        data: gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame],
         output_path: Path,
         target_name: str,
         raw_export: bool,
@@ -330,8 +330,8 @@ class Exporter:
         """Export to ESRI File Geodatabase format"""
         
         # Validate FGDB driver availability
-        if 'FileGDB' not in fiona.supported_drivers:
-            raise RuntimeError("FileGDB driver not available. Please install GDAL with FileGDB support.")
+        if 'OpenFileGDB' not in fiona.supported_drivers:
+            raise RuntimeError("OpenFileGDB driver not available. Please install GDAL with OpenFileGDB support.")
         
         # Create .gdb directory structure (remove if exists)
         if output_path.exists():
@@ -347,13 +347,13 @@ class Exporter:
                 
                 mode = 'w' if i == 0 else 'a'
                 logger.debug(f"Exporting feature class '{fc_name}' with {len(gdf)} features")
-                gdf.to_file(output_path, driver='FileGDB', layer=fc_name, mode=mode)
+                gdf.to_file(output_path, driver='OpenFileGDB', layer=fc_name, mode=mode)
         else:
             # Single feature class
             fc_name = target_name if not raw_export else "features"
             data = self._prepare_for_fgdb(data)
             logger.debug(f"Exporting feature class '{fc_name}' with {len(data)} features")
-            data.to_file(output_path, driver='FileGDB', layer=fc_name)
+            data.to_file(output_path, driver='OpenFileGDB', layer=fc_name)
 
     def _prepare_for_fgdb(self, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """Prepare GeoDataFrame for FGDB export (field name limits, etc.)"""
@@ -405,7 +405,7 @@ class Exporter:
     def _validate_geojson_file(self, filepath: str) -> bool:
         """Validate that exported GeoJSON file is properly formatted."""
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
+            with open(filepath, encoding='utf-8') as f:
                 data = json.load(f)
             
             # Basic GeoJSON structure validation

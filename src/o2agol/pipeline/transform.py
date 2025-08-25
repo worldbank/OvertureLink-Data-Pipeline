@@ -16,6 +16,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely.wkb as _swkb
+from shapely.geometry import MultiPolygon
 from shapely.geometry.base import BaseGeometry
 
 from ..domain.models import Country, Query
@@ -214,6 +215,22 @@ def _make_valid_if_needed(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry
     try:
         return geom if geom.is_valid else geom.buffer(0)
     except Exception:
+        return geom
+
+def _preserve_simple_polygon(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry]:
+    """
+    If a geometry is a MultiPolygon with exactly one part, return that single Polygon.
+    Otherwise, return the geometry unchanged.
+    Keeps valid Polygons as Polygon (avoids everything becoming MultiPolygon).
+    """
+    if geom is None:
+        return None
+    try:
+        if isinstance(geom, MultiPolygon) and len(geom.geoms) == 1:
+            return geom.geoms[0]
+        return geom
+    except Exception:
+        # If anything odd happens, fall back to the original geometry
         return geom
 
 
@@ -458,6 +475,10 @@ def _normalize_buildings_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     
     # Apply transform helpers before return
     result_gdf = enforce_geometry_rules(result_gdf, expected="polygons", validate_polygons=True)
+
+    # Preserve simple Polygons as Polygon (avoid coercing everything to MultiPolygon)
+    result_gdf.geometry = result_gdf.geometry.apply(_preserve_simple_polygon)
+    
     # clip long strings
     for col in result_gdf.columns:
         if col != "geometry":

@@ -10,23 +10,24 @@ from multiple sources:
 Returns unified configuration objects for use in CLI commands.
 """
 
-from pathlib import Path
-from typing import Tuple, Dict, Any
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 import yaml
 
-from .config.settings import Config
 from .config.countries import CountryRegistry
-from .domain.models import RunOptions, Query as DomainQuery, Country as DomainCountry
 from .domain.enums import ClipStrategy
+from .domain.models import Country as DomainCountry
+from .domain.models import Query as DomainQuery
+from .domain.models import RunOptions
 
 
 def load_config(
     query: str, 
     country: str, 
     config_path: str = None
-) -> Tuple[Dict[str, Any], RunOptions, DomainQuery, DomainCountry]:
+) -> tuple[dict[str, Any], RunOptions, DomainQuery, DomainCountry]:
     """
     Load and merge configuration from all sources.
     
@@ -52,12 +53,12 @@ def load_config(
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
     
-    with open(config_path, 'r', encoding='utf-8') as f:
+    with open(config_path, encoding='utf-8') as f:
         agol_config = yaml.safe_load(f)
     
     # Load query definitions
     queries_file = Path(__file__).parent / "data" / "queries.yml"
-    with open(queries_file, 'r', encoding='utf-8') as f:
+    with open(queries_file, encoding='utf-8') as f:
         queries = yaml.safe_load(f)
     
     # Validate query exists
@@ -121,10 +122,10 @@ def load_config(
 
 
 def format_metadata_from_config(
-    config_dict: Dict[str, Any], 
+    config_dict: dict[str, Any], 
     query_config: DomainQuery, 
     country_config: DomainCountry
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Generate AGOL metadata from config templates and dynamic variables.
     
@@ -214,7 +215,7 @@ def format_metadata_from_config(
     return formatted_metadata
 
 
-def load_pipeline_config(config_path: str, country: str) -> Dict[str, Any]:
+def load_pipeline_config(config_path: str, country: str) -> dict[str, Any]:
     """
     Load pipeline configuration (legacy interface for backward compatibility).
     
@@ -229,7 +230,7 @@ def load_pipeline_config(config_path: str, country: str) -> Dict[str, Any]:
     return cfg
 
 
-def get_target_config(cfg: Dict[str, Any], query: str) -> Dict[str, Any]:
+def get_target_config(cfg: dict[str, Any], query: str) -> dict[str, Any]:
     """
     Get target configuration for a specific query.
     
@@ -256,7 +257,7 @@ def validate_query_exists(config_path: str = None, query: str = None) -> bool:
     """
     try:
         queries_file = Path(__file__).parent / "data" / "queries.yml"
-        with open(queries_file, 'r', encoding='utf-8') as f:
+        with open(queries_file, encoding='utf-8') as f:
             queries = yaml.safe_load(f)
         return query in queries
     except Exception:
@@ -274,6 +275,6 @@ def get_available_queries(config_path: str = None) -> list[str]:
         List of available query names
     """
     queries_file = Path(__file__).parent / "data" / "queries.yml"
-    with open(queries_file, 'r', encoding='utf-8') as f:
+    with open(queries_file, encoding='utf-8') as f:
         queries = yaml.safe_load(f)
     return list(queries.keys())

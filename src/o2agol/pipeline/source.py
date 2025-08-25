@@ -8,20 +8,19 @@ This module replaces duck.py and dump_manager.py functionality.
 import json
 import logging
 import os
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Dict, Tuple, Union, List
+from typing import Optional
 
 import duckdb
 import geopandas as gpd
 import pandas as pd
 
-from ..domain.models import Country, RunOptions, Query
-from ..domain.enums import ClipStrategy
 from ..cleanup import get_pid_temp_dir
+from ..domain.enums import ClipStrategy
+from ..domain.models import Country, Query, RunOptions
 
 # Column definitions for each Overture schema type
 # Users can easily add/remove columns here to customize data export
@@ -33,7 +32,7 @@ OVERTURE_COLUMNS = {
         'class',
         'subtype', 
         'version',
-        # 'routes',  # Complex struct - removed due to GDAL export limitations
+        # 'routes',  # Complex struct
         'geometry'
     ],
     'building': [  # Buildings
@@ -52,9 +51,9 @@ OVERTURE_COLUMNS = {
         'categories',  # Full categories struct for filtering
         'categories.primary as category',  # Simplified category for export
         'confidence',
-        # 'addresses',  # Complex struct array - removed due to GDAL export limitations
-        # 'websites',   # Array of strings - removed due to GDAL export limitations
-        # 'socials',    # Array of strings - removed due to GDAL export limitations
+        # 'addresses',  # Complex struct array
+        # 'websites',   # Array of strings
+        # 'socials',    # Array of strings
         'version',
         'geometry'
     ]
@@ -69,8 +68,6 @@ def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame
     Supports basic SQL conditions like:
     - subtype = 'medical'
     - categories.primary = 'health_and_medical'
-    - subtype IN ('service', 'commercial')
-    - categories.primary IN ('retail', 'shopping', 'food_and_drink')
     
     Args:
         gdf: GeoDataFrame to filter
@@ -155,9 +152,9 @@ class CacheMetadata:
     cached_date: str
     feature_count: int
     size_mb: float
-    bbox: Tuple[float, float, float, float]
+    bbox: tuple[float, float, float, float]
     
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             'country': self.country,
@@ -171,7 +168,7 @@ class CacheMetadata:
         }
     
     @classmethod
-    def from_dict(cls, data: Dict) -> 'CacheMetadata':
+    def from_dict(cls, data: dict) -> 'CacheMetadata':
         """Create from dictionary."""
         return cls(
             country=data['country'],
@@ -194,7 +191,7 @@ class CacheQuery:
     release: str = "latest"
     use_divisions: bool = True
     limit: Optional[int] = None
-    filters: Optional[Union[Dict, str]] = None
+    filters: Optional[dict | str] = None
 
 
 class OvertureSource:
@@ -417,7 +414,7 @@ class OvertureSource:
           AND d.bbox.ymax < {ymax}
         """
         
-    def _fetch_dual_query(self, query: Query, country: Country, clip: ClipStrategy, limit: Optional[int] = None) -> Dict[str, gpd.GeoDataFrame]:
+    def _fetch_dual_query(self, query: Query, country: Country, clip: ClipStrategy, limit: Optional[int] = None) -> dict[str, gpd.GeoDataFrame]:
         """
         Execute dual query for places and buildings, returning separate GeoDataFrames for multi-layer service.
         
@@ -467,7 +464,7 @@ class OvertureSource:
                 target_type="building",
                 is_multilayer=False,
                 overture_type="building",
-                category_filter=buildings_filter,
+                filter=buildings_filter,
                 field_mappings=query.field_mappings
             )
             
@@ -675,7 +672,7 @@ class OvertureSource:
         country: Country, 
         clip: ClipStrategy, 
         raw: bool = False
-    ) -> Union[gpd.GeoDataFrame, Dict[str, gpd.GeoDataFrame]]:
+    ) -> gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame]:
         """
         Read Overture data for specified query and country.
         
@@ -711,11 +708,13 @@ class OvertureSource:
         if self._enable_cache:
             try:
                 logging.debug(f"Trying cache for {country.iso2}/{query.theme}/{query.type}")
+                configured_release = self.cfg.get('overture', {}).get('release', '2025-07-23.0')
+                logging.info(f"Using configured release: {configured_release}")
                 cache_query = CacheQuery(
                     country=country.iso2,
                     theme=query.theme,
                     type_name=query.type,
-                    release="2025-07-23.0",
+                    release=configured_release,
                     use_divisions=clip == ClipStrategy.DIVISIONS,
                     limit=self.run.limit,
                     filters=query.filter
@@ -735,13 +734,13 @@ class OvertureSource:
                 logging.debug(f"Trying local dumps for {country.iso2}/{query.theme}/{query.type}")
                 
                 # Check if dump exists for the theme
-                if self._check_dump_exists("2025-07-23.0", query.theme):
+                if self._check_dump_exists(self.cfg.get('overture', {}).get('release', '2025-07-23.0'), query.theme):
                     logging.info(f"Local dump available for {query.theme}, using dump-based query")
                     gdf = self._read_from_dump(
                         theme=query.theme,
                         type_name=query.type,
                         country=country.iso2,
-                        release="2025-07-23.0",
+                        release=self.cfg.get('overture', {}).get('release', '2025-07-23.0'),
                         limit=self.run.limit,
                         filters=query.filter
                     )
@@ -763,7 +762,7 @@ class OvertureSource:
                     country=country.iso2,
                     theme=query.theme,
                     type_name=query.type,
-                    release="2025-07-23.0",
+                    release=self.cfg.get('overture', {}).get('release', '2025-07-23.0'),
                     use_divisions=clip == ClipStrategy.DIVISIONS,
                     limit=None,  # Cache full data, not limited
                     filters=None  # Cache full data, not filtered
@@ -797,7 +796,7 @@ class OvertureSource:
         
         return gdf
     
-    def _read_multilayer_with_fallback(self, query: Query, country: Country, clip: ClipStrategy) -> Dict[str, gpd.GeoDataFrame]:
+    def _read_multilayer_with_fallback(self, query: Query, country: Country, clip: ClipStrategy) -> dict[str, gpd.GeoDataFrame]:
         """
         Read multi-layer data with cache->dump->S3 fallback logic.
         """
@@ -806,7 +805,7 @@ class OvertureSource:
         types = ['place', 'building']
         results = {}
         
-        for theme, type_name in zip(themes, types):
+        for theme, type_name in zip(themes, types, strict=False):
             # Create a single-layer query for each theme with appropriate filter
             if theme == 'buildings':
                 # Use building_filter for buildings (e.g., "subtype = 'education'")
@@ -893,7 +892,7 @@ class OvertureSource:
             logging.error(error_msg)
             raise
             
-    def _fetch_dual_query_with_retry(self, query: Query, country: Country, clip: ClipStrategy, limit: Optional[int], attempt: int) -> Dict[str, gpd.GeoDataFrame]:
+    def _fetch_dual_query_with_retry(self, query: Query, country: Country, clip: ClipStrategy, limit: Optional[int], attempt: int) -> dict[str, gpd.GeoDataFrame]:
         """Execute dual query with error handling and fallback logic."""
         try:
             return self._fetch_dual_query(query, country, clip, limit)
@@ -915,7 +914,7 @@ class OvertureSource:
     # Dump Management Methods
     # =============================================================================
     
-    def ensure_dump(self, theme: str, release: str = "2025-07-23.0", force_download: bool = False) -> Path:
+    def ensure_dump(self, theme: str, release: str = None, force_download: bool = False) -> Path:
         """
         Download complete theme from Overture S3 bucket if needed.
         
@@ -933,6 +932,10 @@ class OvertureSource:
         """
         if not self._use_local_dumps:
             raise RuntimeError("Local dumps are disabled in configuration")
+        
+        # Use configured release if none provided
+        if release is None:
+            release = self.cfg.get('overture', {}).get('release', '2025-07-23.0')
             
         if theme not in self.OVERTURE_THEMES:
             raise ValueError(f"Invalid theme: {theme}. Valid themes: {self.OVERTURE_THEMES}")
@@ -1035,7 +1038,7 @@ class OvertureSource:
             self._dump_metadata_cache[f"{release}:{theme}"] = metadata
             
             elapsed_total = time.time() - start_time
-            logging.info(f"Download completed successfully!")
+            logging.info("Download completed successfully!")
             logging.info(f"Total size: {total_size_gb:.2f} GB")
             logging.info(f"Total time: {elapsed_total/60:.1f} minutes")
             logging.info(f"Location: {dump_path}")
@@ -1124,7 +1127,7 @@ class OvertureSource:
         logging.debug(f"Download connection configured: {memory_limit} memory, 4 threads")
         return con
     
-    def _get_theme_types(self, con: duckdb.DuckDBPyConnection, release: str, theme: str) -> List[str]:
+    def _get_theme_types(self, con: duckdb.DuckDBPyConnection, release: str, theme: str) -> list[str]:
         """Get available types for a theme using known Overture schema."""
         # Use known Overture schema - more reliable than querying S3 structure
         type_mapping = {
@@ -1370,7 +1373,7 @@ class OvertureSource:
         return (self._cache_dir / query.release / country_iso2 / 
                 f"{country_iso2}_{sector_name}.parquet")
     
-    def list_cached_countries(self, release: str = "latest") -> List[CacheMetadata]:
+    def list_cached_countries(self, release: str = "latest") -> list[CacheMetadata]:
         """
         List all cached countries for a release.
         
@@ -1443,7 +1446,7 @@ class OvertureSource:
                 self._cache_dir.mkdir(parents=True, exist_ok=True)
                 logging.info("Cleared entire cache")
     
-    def get_cache_stats(self) -> Dict:
+    def get_cache_stats(self) -> dict:
         """Get cache statistics."""
         if not self._enable_cache:
             return {
@@ -1478,7 +1481,7 @@ class OvertureSource:
     def _get_latest_cache_release(self) -> str:
         """Get the latest release version from cache directories."""
         if not self._cache_dir.exists():
-            return "2025-07-23.0"  # Default current release
+            return self.cfg.get('overture', {}).get('release', '2025-07-23.0')  # Default current release
             
         releases = []
         for item in self._cache_dir.iterdir():
@@ -1486,7 +1489,7 @@ class OvertureSource:
                 releases.append(item.name)
         
         if not releases:
-            return "2025-07-23.0"  # Default current release
+            return self.cfg.get('overture', {}).get('release', '2025-07-23.0')  # Default current release
         
         # Sort releases and return the latest
         releases.sort(reverse=True)
@@ -1497,8 +1500,8 @@ class OvertureSource:
     # =====================================================================
     
     def _read_from_dump(self, theme: str, type_name: str, country: str, 
-                       release: str = "2025-07-23.0", limit: Optional[int] = None, 
-                       filters: Optional[Union[Dict, str]] = None, 
+                       release: str = None, limit: Optional[int] = None, 
+                       filters: Optional[dict | str] = None, 
                        force_refresh: bool = False) -> gpd.GeoDataFrame:
         """
         Read data from local dumps using country-specific caching.
@@ -1520,6 +1523,10 @@ class OvertureSource:
         """
         if not self._use_local_dumps:
             raise ValueError("Local dumps are disabled")
+            
+        # Use configured release if none provided
+        if release is None:
+            release = self.cfg.get('overture', {}).get('release', '2025-07-23.0')
             
         if not country:
             raise ValueError("Country must be specified for dump-based queries")
@@ -1568,6 +1575,7 @@ class OvertureSource:
         """
         try:
             import re
+
             import pandas as pd
             
             if 'categories.primary =' in target_filter:

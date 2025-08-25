@@ -10,7 +10,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from .enums import ClipStrategy, Mode
+from .enums import ClipStrategy
 
 
 class Country(BaseModel):

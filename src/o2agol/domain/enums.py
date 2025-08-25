@@ -33,8 +33,8 @@ class TargetType(str, Enum):
 
 class ExportFormat(str, Enum):
     """Export format options for data output."""
-    GEOJSON = "geojson"     # Standards-compliant JSON format
     GPKG = "gpkg"           # SQLite-based format with multi-layer support
+    GEOJSON = "geojson"     # Standards-compliant JSON format
     FGDB = "fgdb"           # ESRI File Geodatabase format
 
 
