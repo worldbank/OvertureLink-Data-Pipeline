@@ -1262,7 +1262,7 @@ def overture_dump(
     download_only: Annotated[bool, typer.Option("--download-only", help="Only download dump without processing")] = False,
     use_local: Annotated[bool, typer.Option("--use-local/--use-s3", help="Use local dump if available")] = True,
     force_download: Annotated[bool, typer.Option("--force-download", help="Force re-download even if dump exists")] = False,
-    release: Annotated[str, typer.Option("--release", help="Overture release version")] = "2025-07-23.0",
+    release: Annotated[str, typer.Option("--release", help="Overture release version")] = None,
     staging_format: Annotated[str, typer.Option("--format", help="Staging format for AGOL upload: geojson, gpkg, or fgdb")] = "gpkg",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
@@ -1326,6 +1326,11 @@ def overture_dump(
     if not country:
         typer.echo("ERROR: --country is required for dump processing", err=True)
         raise typer.Exit(1)
+    
+    # Use configured release if none provided
+    if release is None:
+        from .config.settings import Config
+        release = Config().overture.release
     
     # Setup logging
     log_mode = "dump"
@@ -1779,7 +1784,7 @@ def overture_dump(
 @app.command("list-cache")
 def list_cache(
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "src/o2agol/data/agol_metadata.yml",
-    release: Annotated[str, typer.Option("--release", help="Overture release version")] = "latest",
+    release: Annotated[str, typer.Option("--release", help="Overture release version")] = None,
 ):
     """
     List cached country data entries.
@@ -1787,6 +1792,11 @@ def list_cache(
     Shows all cached data with metadata including country, theme, feature counts, and file sizes.
     """
     try:
+        # Use configured release if none provided
+        if release is None:
+            from .config.settings import Config
+            release = Config().overture.release
+        
         # Use OvertureSource for cache management (integrated dump manager functionality)
         from .domain.enums import ClipStrategy
         from .domain.models import RunOptions

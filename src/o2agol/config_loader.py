@@ -17,6 +17,7 @@ from typing import Any
 import yaml
 
 from .config.countries import CountryRegistry
+from .config.settings import Config
 from .domain.enums import ClipStrategy
 from .domain.models import Country as DomainCountry
 from .domain.models import Query as DomainQuery
@@ -106,7 +107,9 @@ def load_config(
         bounds=CountryRegistry.get_bounding_boxes().get(country_info.iso2, (0, 0, 0, 0))
     )
     
-    # Merge configurations
+    # Merge configurations - add overture config from environment variable
+    # This ensures all components use the same release from OVERTURE_RELEASE env var
+    overture_config = Config().overture
     cfg = {
         **agol_config,
         'query': query_config,
@@ -115,6 +118,11 @@ def load_config(
             'iso2': country_info.iso2,
             'iso3': country_info.iso3,
             'region': country_info.region
+        },
+        'overture': {
+            'base_url': overture_config.base_url,
+            's3_region': overture_config.s3_region,
+            'release': overture_config.release
         }
     }
     
@@ -151,7 +159,7 @@ def format_metadata_from_config(
         'sector_description': query_config.sector_description or f"{query_config.type} data",
         'sector_tag': query_config.sector_tag or query_config.name,
         'data_type': query_config.data_type or query_config.type.title(),
-        'release': config_dict.get('overture', {}).get('release', '2025-07-23.0'),
+        'release': Config().overture.release,
         'update_frequency': organization.get('update_frequency', 'Monthly'),
         'contact_email': organization.get('contact_email', 'contact@example.com'),
         'license': organization.get('license', 'Internal use only'),

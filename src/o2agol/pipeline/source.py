@@ -309,7 +309,9 @@ class OvertureSource:
         """Return proper parquet URL using Overture configuration."""
         overture_config = self.cfg.get('overture', {})
         base_url = overture_config.get('base_url', 's3://overturemaps-us-west-2/release')
-        release = overture_config.get('release', '2025-07-23.0')
+        release = overture_config.get('release')
+        if not release:
+            raise ValueError("No Overture release configured. Set OVERTURE_RELEASE environment variable.")
         
         # Ensure base_url includes the release
         if not base_url.endswith(release):
@@ -708,8 +710,9 @@ class OvertureSource:
         if self._enable_cache:
             try:
                 logging.debug(f"Trying cache for {country.iso2}/{query.theme}/{query.type}")
-                configured_release = self.cfg.get('overture', {}).get('release', '2025-07-23.0')
-                logging.info(f"Using configured release: {configured_release}")
+                configured_release = self.cfg.get('overture', {}).get('release')
+                if not configured_release:
+                    raise ValueError("No Overture release configured. Set OVERTURE_RELEASE environment variable.")
                 cache_query = CacheQuery(
                     country=country.iso2,
                     theme=query.theme,
@@ -734,13 +737,16 @@ class OvertureSource:
                 logging.debug(f"Trying local dumps for {country.iso2}/{query.theme}/{query.type}")
                 
                 # Check if dump exists for the theme
-                if self._check_dump_exists(self.cfg.get('overture', {}).get('release', '2025-07-23.0'), query.theme):
+                dump_release = self.cfg.get('overture', {}).get('release')
+                if not dump_release:
+                    raise ValueError("No Overture release configured. Set OVERTURE_RELEASE environment variable.")
+                if self._check_dump_exists(dump_release, query.theme):
                     logging.info(f"Local dump available for {query.theme}, using dump-based query")
                     gdf = self._read_from_dump(
                         theme=query.theme,
                         type_name=query.type,
                         country=country.iso2,
-                        release=self.cfg.get('overture', {}).get('release', '2025-07-23.0'),
+                        release=dump_release,
                         limit=self.run.limit,
                         filters=query.filter
                     )
@@ -762,7 +768,7 @@ class OvertureSource:
                     country=country.iso2,
                     theme=query.theme,
                     type_name=query.type,
-                    release=self.cfg.get('overture', {}).get('release', '2025-07-23.0'),
+                    release=configured_release,
                     use_divisions=clip == ClipStrategy.DIVISIONS,
                     limit=None,  # Cache full data, not limited
                     filters=None  # Cache full data, not filtered
@@ -935,7 +941,9 @@ class OvertureSource:
         
         # Use configured release if none provided
         if release is None:
-            release = self.cfg.get('overture', {}).get('release', '2025-07-23.0')
+            release = self.cfg.get('overture', {}).get('release')
+            if not release:
+                raise ValueError("No Overture release configured. Set OVERTURE_RELEASE environment variable.")
             
         if theme not in self.OVERTURE_THEMES:
             raise ValueError(f"Invalid theme: {theme}. Valid themes: {self.OVERTURE_THEMES}")
@@ -1481,7 +1489,10 @@ class OvertureSource:
     def _get_latest_cache_release(self) -> str:
         """Get the latest release version from cache directories."""
         if not self._cache_dir.exists():
-            return self.cfg.get('overture', {}).get('release', '2025-07-23.0')  # Default current release
+            configured_release = self.cfg.get('overture', {}).get('release')
+            if not configured_release:
+                raise ValueError("No Overture release configured. Set OVERTURE_RELEASE environment variable.")
+            return configured_release
             
         releases = []
         for item in self._cache_dir.iterdir():
@@ -1489,7 +1500,10 @@ class OvertureSource:
                 releases.append(item.name)
         
         if not releases:
-            return self.cfg.get('overture', {}).get('release', '2025-07-23.0')  # Default current release
+            configured_release = self.cfg.get('overture', {}).get('release')
+            if not configured_release:
+                raise ValueError("No Overture release configured. Set OVERTURE_RELEASE environment variable.")
+            return configured_release
         
         # Sort releases and return the latest
         releases.sort(reverse=True)
@@ -1526,7 +1540,9 @@ class OvertureSource:
             
         # Use configured release if none provided
         if release is None:
-            release = self.cfg.get('overture', {}).get('release', '2025-07-23.0')
+            release = self.cfg.get('overture', {}).get('release')
+            if not release:
+                raise ValueError("No Overture release configured. Set OVERTURE_RELEASE environment variable.")
             
         if not country:
             raise ValueError("Country must be specified for dump-based queries")

@@ -304,15 +304,21 @@ class Config:
         else:
             # Try environment-specific file first
             env_specific_file = self.project_root / f".env.{self.environment}"
+            logger.info(f"Looking for environment config at: {env_specific_file}")
             if env_specific_file.exists():
-                load_dotenv(env_specific_file)
+                logger.info(f"Loading environment config from: {env_specific_file}")
+                load_dotenv(env_specific_file, override=True)
                 loaded_files.append(str(env_specific_file))
                 logger.info(f"Loaded environment-specific config: {env_specific_file}")
+            else:
+                logger.info(f"Environment-specific file not found: {env_specific_file}")
             
             # Then try generic .env file
             generic_env_file = self.project_root / ".env"
+            logger.info(f"Looking for generic config at: {generic_env_file}")
             if generic_env_file.exists():
-                load_dotenv(generic_env_file)
+                logger.info(f"Loading generic config from: {generic_env_file}")
+                load_dotenv(generic_env_file, override=True)
                 loaded_files.append(str(generic_env_file))
                 logger.info(f"Loaded generic config: {generic_env_file}")
             else:
