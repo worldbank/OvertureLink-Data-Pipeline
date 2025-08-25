@@ -29,7 +29,7 @@ BATCH_THRESHOLD  = int(os.environ.get("BatchThreshold", "200000"))   # switch to
 BATCH_SIZE       = int(os.environ.get("BatchSize", "500000"))        # starting part size per append job
 BATCH_MIN        = int(os.environ.get("BatchMin", "50000"))          # floor for adaptive halves
 SEED_SIZE        = int(os.environ.get("SeedSize", "2000"))           # small seed to establish schema
-APPEND_TIMEOUT_S = int(os.environ.get("AppendTimeout", "14400"))     # 4h for big append jobs
+APPEND_TIMEOUT_S = int(os.environ.get("AppendTimeout", "14400"))     
 
 # Logging defaults
 logger = logging.getLogger(__name__)
