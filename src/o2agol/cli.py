@@ -561,7 +561,7 @@ def process_target(
             
             # Map mode string to Mode enum
             from .domain.enums import Mode
-            publish_mode = Mode(mode if mode != "auto" else "initial")
+            publish_mode = Mode(mode)
             
             publisher = FeatureLayerManager(gis, publish_mode)
             
@@ -572,7 +572,8 @@ def process_target(
             result = publisher.publish_multi_layer_service(
                 layer_data=normalized_data,
                 service_name=f"{country_config.iso3.lower()}_{query_config.name}",
-                metadata=metadata
+                metadata=metadata,
+                mode=publish_mode
             )
             total_published = sum(len(gdf) for gdf in normalized_data.values())
         else:
@@ -982,14 +983,16 @@ def arcgis_upload(
             item_id = publisher.publish_multi_layer_service(
                 layer_data=transformed_data,
                 service_name=f"{country_config.iso3.lower()}_{query_config.name}",
-                metadata=metadata
+                metadata=metadata,
+                mode=publish_mode
             )
         else:
             # Single-layer service (roads, buildings, places) - using GeoPackage staging
             item_id = publisher.publish_multi_layer_service(
                 layer_data=transformed_data,
                 service_name=f"{country_config.iso3.lower()}_{query_config.name}",
-                metadata=metadata
+                metadata=metadata,
+                mode=publish_mode
             )
         
         if item_id:
@@ -1629,7 +1632,7 @@ def overture_dump(
             
             # Map mode string to Mode enum
             from .domain.enums import Mode
-            publish_mode = Mode(mode if mode != "auto" else "initial")
+            publish_mode = Mode(mode)
             
             publisher = FeatureLayerManager(gis, publish_mode)
             
@@ -1642,6 +1645,7 @@ def overture_dump(
                 layer_data=transformed_data,
                 service_name=f"{country_config.iso3.lower()}_{query_config.name}",
                 metadata=metadata,
+                mode=publish_mode,
                 staging_format=staging_format
             )
             
@@ -1712,7 +1716,7 @@ def overture_dump(
             gis = config_obj.create_gis_connection()
             
             # Map mode string to Mode enum
-            publish_mode = Mode(mode if mode != "auto" else "initial")
+            publish_mode = Mode(mode)
             publisher = FeatureLayerManager(gis, publish_mode)
             
             # Create metadata from configuration
@@ -1725,6 +1729,7 @@ def overture_dump(
                     layer_data=gdf_transformed,
                     service_name=f"{country_config.iso3.lower()}_{query_config.name}",
                     metadata=metadata,
+                    mode=publish_mode,
                     staging_format=staging_format
                 )
                 
