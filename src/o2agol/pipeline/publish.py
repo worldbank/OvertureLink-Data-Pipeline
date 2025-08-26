@@ -15,7 +15,7 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping
+from typing import Any, Dict, Iterable, Mapping, Optional
 import tempfile
 from pathlib import Path
 
@@ -29,7 +29,8 @@ BATCH_THRESHOLD  = int(os.environ.get("BatchThreshold", "200000"))   # switch to
 BATCH_SIZE       = int(os.environ.get("BatchSize", "500000"))        # starting part size per append job
 BATCH_MIN        = int(os.environ.get("BatchMin", "50000"))          # floor for adaptive halves
 SEED_SIZE        = int(os.environ.get("SeedSize", "2000"))           # small seed to establish schema
-APPEND_TIMEOUT_S = int(os.environ.get("AppendTimeout", "14400"))     # 4h for big append jobs
+APPEND_TIMEOUT_S = int(os.environ.get("AppendTimeout", "14400"))
+USE_ASYNC_APPEND = os.environ.get("USE_ASYNC_APPEND", "false").lower() == "true"  # Control async behavior
 
 # Logging defaults
 logger = logging.getLogger(__name__)
@@ -54,9 +55,11 @@ class FeatureLayerManager:
         function create new on initial if you prefer (optional stub provided).
     """
 
-    def __init__(self, gis, mode: str = "auto"):
+    def __init__(self, gis, mode: str = "auto", use_async: Optional[bool] = None):
         self.gis = gis
         self.mode = mode
+        # CLI argument overrides environment variable
+        self.use_async = use_async if use_async is not None else USE_ASYNC_APPEND
 
     # ----------------------------
     # Name + geometry helpers
@@ -234,10 +237,28 @@ class FeatureLayerManager:
     def _poll_append_job(self, job, timeout_s: int) -> dict:
         start = time.time()
         while True:
-            if hasattr(job, "done") and job.done():
-                return job.result() or {"success": True}
+            # Check if job has completed
+            if hasattr(job, "done"):
+                try:
+                    if job.done():
+                        return job.result() or {"success": True}
+                except Exception as e:
+                    logger.debug(f"Error checking job status: {e}")
+                    # If we can't check status, wait a bit and retry
+                    time.sleep(2)
+                    continue
+            
+            # For synchronous jobs or jobs without done() method
+            if hasattr(job, "status"):
+                if job.status in ["completed", "succeeded", "CompletedSuccessfully"]:
+                    return {"success": True}
+                elif job.status in ["failed", "CompletedWithErrors"]:
+                    raise RuntimeError(f"Append job failed with status: {job.status}")
+            
+            # Check timeout
             if time.time() - start > timeout_s:
                 raise RuntimeError(f"Append job timed out after {timeout_s}s")
+            
             time.sleep(2)
 
     def _append_via_item_hardened(
@@ -245,7 +266,7 @@ class FeatureLayerManager:
         feature_layer,
         gdf: gpd.GeoDataFrame,
         staging_format: str = StagingFormat.GPKG,
-        use_async: bool = True
+        use_async: Optional[bool] = None
     ) -> bool:
         """
         Stage gdf as temp item (GPKG/GeoJSON) and call feature_layer.append(item_id=...).
@@ -288,6 +309,11 @@ class FeatureLayerManager:
 
             append_fields = self._target_append_fields(feature_layer, [c for c in gdf.columns if c != "geometry"])
 
+            # Use parameter if provided, otherwise use instance setting
+            actual_use_async = use_async if use_async is not None else self.use_async
+            
+            logger.info(f"Starting append operation with temp item {temp_item.id} ({len(gdf)} features)")
+            
             job = feature_layer.append(
                 item_id=temp_item.id,
                 upload_format=upload_format,
@@ -299,24 +325,39 @@ class FeatureLayerManager:
                 update_geometry=True,
                 rollback=True,
                 return_messages=True,
-                future=use_async
+                future=actual_use_async
             )
 
-            if use_async:
-                self._poll_append_job(job, timeout_s=APPEND_TIMEOUT_S)
+            if actual_use_async:
+                logger.info(f"Async append started, polling for completion (timeout: {APPEND_TIMEOUT_S}s)")
+                try:
+                    self._poll_append_job(job, timeout_s=APPEND_TIMEOUT_S)
+                    logger.info("Append job completed successfully")
+                except Exception as e:
+                    logger.error(f"Append job failed or timed out: {e}")
+                    raise
+            else:
+                logger.info("Synchronous append completed")
 
             return True
 
         finally:
-            try:
-                if temp_item:
+            # Clean up temp item from AGOL
+            if temp_item:
+                try:
+                    logger.debug(f"Deleting temp item {temp_item.id} from AGOL")
                     temp_item.delete()
-            except Exception:
-                pass
+                    logger.debug("Temp item deleted successfully")
+                except Exception as e:
+                    logger.debug(f"Failed to delete temp item: {e}")
+            
+            # Clean up local staging file
             try:
-                os.unlink(staging_file.name)
-            except Exception:
-                pass
+                if staging_file and hasattr(staging_file, 'name'):
+                    logger.debug(f"Removing local staging file {staging_file.name}")
+                    os.unlink(staging_file.name)
+            except Exception as e:
+                logger.debug(f"Failed to remove staging file: {e}")
 
     def _append_via_batches(
         self,
@@ -343,7 +384,7 @@ class FeatureLayerManager:
 
             logger.info(f"[append] part {part}: {len(part_gdf):,} features (window {start}:{end}, batch={bs:,})")
             try:
-                self._append_via_item_hardened(feature_layer, part_gdf, staging_format=staging_format, use_async=True)
+                self._append_via_item_hardened(feature_layer, part_gdf, staging_format=staging_format, use_async=self.use_async)
                 start = end
 
             except Exception as e:
@@ -371,7 +412,7 @@ class FeatureLayerManager:
         rest = prepared_gdf.iloc[seed_count:].copy()
 
         logger.info(f"Seeding {seed_count:,} features to initialize schema...")
-        self._append_via_item_hardened(feature_layer, seed, staging_format=StagingFormat.GPKG, use_async=True)
+        self._append_via_item_hardened(feature_layer, seed, staging_format=StagingFormat.GPKG, use_async=self.use_async)
 
         if len(rest) > 0:
             if len(rest) >= BATCH_THRESHOLD:
@@ -379,7 +420,7 @@ class FeatureLayerManager:
                 self._append_via_batches(feature_layer, rest, batch_size=BATCH_SIZE, staging_format=StagingFormat.GPKG)
             else:
                 logger.info(f"Appending remaining {len(rest):,} features in a single job...")
-                self._append_via_item_hardened(feature_layer, rest, staging_format=StagingFormat.GPKG, use_async=True)
+                self._append_via_item_hardened(feature_layer, rest, staging_format=StagingFormat.GPKG, use_async=self.use_async)
 
     def publish_or_update(
         self,
@@ -407,14 +448,14 @@ class FeatureLayerManager:
             if len(gdf) >= BATCH_THRESHOLD:
                 self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=StagingFormat.GPKG)
             else:
-                self._append_via_item_hardened(feature_layer, gdf, staging_format=StagingFormat.GPKG, use_async=True)
+                self._append_via_item_hardened(feature_layer, gdf, staging_format=StagingFormat.GPKG, use_async=self.use_async)
             return
 
         # append / auto default: append without truncate
         if len(gdf) >= BATCH_THRESHOLD:
             self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=StagingFormat.GPKG)
         else:
-            self._append_via_item_hardened(feature_layer, gdf, staging_format=StagingFormat.GPKG, use_async=True)
+            self._append_via_item_hardened(feature_layer, gdf, staging_format=StagingFormat.GPKG, use_async=self.use_async)
 
     # ----------------------------
     # Multi-layer entrypoint
@@ -560,3 +601,42 @@ class FeatureLayerManager:
             self.publish_or_update(target_layer, gdf, mode=mode)
 
         return existing_id
+    
+    def close(self):
+        """Clean up GIS connection resources."""
+        if hasattr(self, 'gis') and self.gis:
+            try:
+                # Force close any active GIS sessions
+                if hasattr(self.gis, '_portal'):
+                    portal = self.gis._portal
+                    
+                    # Close the session if it exists
+                    if hasattr(portal, '_session') and portal._session:
+                        try:
+                            portal._session.close()
+                            logger.debug("Closed GIS portal session")
+                        except Exception:
+                            pass
+                    
+                    # Clear any connection pools
+                    if hasattr(portal, 'con') and hasattr(portal.con, '_session'):
+                        try:
+                            portal.con._session.close()
+                            logger.debug("Closed portal connection session")
+                        except Exception:
+                            pass
+                    
+                    # Set to None to release references
+                    self.gis._portal = None
+                
+                # Clear the GIS object reference
+                self.gis = None
+                logger.debug("GIS connection fully cleaned up")
+                
+            except Exception as e:
+                logger.debug(f"Error during GIS cleanup: {e}")
+                # Still try to clear the reference
+                try:
+                    self.gis = None
+                except Exception:
+                    pass

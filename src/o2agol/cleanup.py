@@ -11,19 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-
-def get_project_temp_dir() -> Path:
-    """Get the project's temp directory path."""
-    project_root = Path(__file__).parent.parent.parent
-    return project_root / "temp"
-
-
-def get_pid_temp_dir() -> Path:
-    """Get process-isolated temp directory for current PID."""
-    temp_dir = get_project_temp_dir()
-    pid_dir = temp_dir / f"pid_{os.getpid()}"
-    pid_dir.mkdir(parents=True, exist_ok=True)
-    return pid_dir
+from .utils import get_project_temp_dir, get_pid_temp_dir
 
 
 def is_directory_tree_empty(directory: Path) -> bool:
@@ -156,6 +144,53 @@ def cleanup_current_pid() -> None:
             logging.warning(f"Could not clean PID temp directory {pid_dir}: {e}")
 
 
+def cleanup_orphaned_pids() -> int:
+    """
+    Clean up PID directories from processes that are no longer running.
+    
+    Returns:
+        Number of orphaned PID directories cleaned up
+    """
+    import psutil
+    
+    temp_dir = get_project_temp_dir()
+    if not temp_dir.exists():
+        return 0
+    
+    # Get list of currently running PIDs
+    running_pids = set(psutil.pids())
+    current_pid = os.getpid()
+    cleaned_count = 0
+    
+    for pid_dir in temp_dir.glob("pid_*"):
+        if not pid_dir.is_dir():
+            continue
+            
+        # Extract PID from directory name
+        try:
+            dir_pid = int(pid_dir.name.split("_")[1])
+        except (ValueError, IndexError):
+            continue
+        
+        # Skip current process
+        if dir_pid == current_pid:
+            continue
+            
+        # Clean up if process is not running
+        if dir_pid not in running_pids:
+            try:
+                shutil.rmtree(pid_dir)
+                logging.info(f"Cleaned up orphaned PID directory: {pid_dir}")
+                cleaned_count += 1
+            except OSError as e:
+                logging.warning(f"Could not remove orphaned PID directory {pid_dir}: {e}")
+    
+    if cleaned_count > 0:
+        logging.info(f"Cleaned up {cleaned_count} orphaned PID directories")
+    
+    return cleaned_count
+
+
 def register_cleanup_handlers() -> None:
     """Register signal handlers and atexit handler for cleanup."""
     def signal_handler(signum: int, frame) -> None:
@@ -217,6 +252,9 @@ def full_cleanup_check(
     ensure_temp_structure()
     
     if not skip_cleanup:
+        # Clean up orphaned PID directories first
+        cleanup_orphaned_pids()
+        # Then clean up stale files
         cleanup_stale_files(retention_hours)
         
     return check_temp_size_limits(warning_gb, limit_gb)

@@ -1288,6 +1288,20 @@ class OvertureSource:
         elapsed = time.time() - start_time
         logging.debug(f"Cached {len(gdf):,} features in {elapsed:.1f}s: {cache_file.name}")
         
+        # Apply filters to the result if specified in original query
+        if query.filters:
+            if isinstance(query.filters, dict):
+                # Dictionary-based column filtering
+                original_count = len(gdf)
+                for column, value in query.filters.items():
+                    if column in gdf.columns:
+                        gdf = gdf[gdf[column] == value]
+            else:
+                # String-based SQL filter - apply same logic as get_cached_data
+                original_count = len(gdf)
+                gdf = apply_sql_filter(gdf, query.filters)
+                logging.debug(f"Applied filter '{query.filters}': {original_count:,} -> {len(gdf):,} features")
+        
         # Apply limit to the result if specified in original query
         if query.limit:
             gdf = gdf.head(query.limit)
