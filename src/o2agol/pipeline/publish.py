@@ -451,7 +451,10 @@ class FeatureLayerManager:
                 self._append_via_item_hardened(feature_layer, gdf, staging_format=StagingFormat.GPKG, use_async=self.use_async)
             return
 
-        # append / auto default: append without truncate
+        if m == "auto":
+            logger.info("Truncating layer prior to append (auto mode on existing service)...")
+            feature_layer.manager.truncate()
+            
         if len(gdf) >= BATCH_THRESHOLD:
             self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=StagingFormat.GPKG)
         else:
