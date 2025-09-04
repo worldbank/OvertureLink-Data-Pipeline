@@ -89,11 +89,7 @@ The Python CLI has three main commands: uploading to AGOL, downloading as geojso
    or
    `python -m o2agol.cli list-queries`
 
-And add you own query in the global config (`configs\global.yml`)
-
-### Clip modes
-- Overture Division Clip: precise geometric clip with bbox pre-filtering. Use `--use-divisions` for production (default).
-- Box: bbox-only overlap for fastest processing. Use `--use-bbox` for development and testing.
+And add you own query in the global config (`src\o2agol\data\queries.yml`)
 
 ## Outputs
 
@@ -150,10 +146,6 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - `--mode overwrite` - Force update of existing layer (requires item_id in config)
 - `--mode append` - Add data to existing layer without clearing (requires item_id in config)
 
-### Clipping
-- `--use-divisions` (default) - Uses Overture Divisions for precise boundaries with bbox pre-filtering for optimal performance
-- `--use-bbox` - Fast bbox-only filtering for development and testing
-
 ## Examples:
 
 ### ArcGIS Online Upload:
@@ -172,11 +164,11 @@ Efficiently manage local cache and dump storage:
 
 ```bash
 # List all cached data with metadata
-o2agol cache-list
+o2agol list-cache
 
 # Clear cache by country or release
-o2agol cache-clear --country afg
-o2agol cache-clear --release 2025-07-23.0
+o2agol clear-cache --country afg
+o2agol clear-cache --release 2025-07-23.0
 
 # Force fresh download (replaces existing)
 o2agol overture-dump buildings --country afg --force-download
@@ -195,11 +187,10 @@ o2agol overture-dump buildings --country afg --force-download
 - **Additional Output Formats**: Support for Shapefile, CSV, and other common formats
 - **Cloud Integration**: Native support for cloud storage backends (S3, Azure Blob, GCS)
 
-
 ## Sources
 - Overture documentation: https://docs.overturemaps.org/guides/divisions/
 - Mark Litwintschik's post on using DuckDB: https://tech.marksblogg.com/duckdb-gis-spatial-extension.html
-- Chris Holme's excellent tutoral here: https://github.com/cholmes/duckdb-geoparquet-tutorials/tree/main
+- Chris Holme's excellent tutorial here: https://github.com/cholmes/duckdb-geoparquet-tutorials/tree/main
 - Georock's post on spatial clipping: https://geo.rocks/post/duckdb_geospatial/
 - Bounding Box extracts from Natural Earth: https://github.com/sandstrom/country-bounding-boxes/tree/master
 - This ArcGIS Pro extension that helped inspire this workflow: https://github.com/COF-RyLopez/ArcGISPro-GeoParquet-Addin
