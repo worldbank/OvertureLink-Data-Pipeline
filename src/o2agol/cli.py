@@ -59,22 +59,27 @@ def fetch_data(
         raise
 
 
-def publish_to_agol(gdf, metadata: dict, mode: str, gis) -> str:
+def publish_to_agol(gdf, metadata: dict, mode: str, gis, use_async: bool = False) -> str:
     """
     Publish GeoDataFrame to ArcGIS Online using GeoPackage staging.
     Uses publish_multi_layer_service for consistent 45x faster uploads.
     """
+    manager = None
     try:
         from .domain.enums import Mode
         publish_mode = Mode(mode)
-        manager = FeatureLayerManager(gis, publish_mode)
+        manager = FeatureLayerManager(gis, publish_mode, use_async=use_async)
         
         service_name = metadata.get('title', 'default_layer')
-        return manager.publish_multi_layer_service(gdf, service_name, metadata, publish_mode)
+        result = manager.publish_multi_layer_service(gdf, service_name, metadata, publish_mode)
+        return result
         
     except Exception as e:
         logging.error(f"Failed to publish to AGOL: {e}")
         raise
+    finally:
+        if manager:
+            manager.close()
 
 
 def setup_logging(verbose: bool, target_name: Optional[str] = None, mode: Optional[str] = None, enable_file_logging: bool = False):
@@ -563,7 +568,7 @@ def process_target(
             from .domain.enums import Mode
             publish_mode = Mode(mode)
             
-            publisher = FeatureLayerManager(gis, publish_mode)
+            publisher = FeatureLayerManager(gis, publish_mode, use_async=use_async)
             
             # Create metadata from configuration
             from .config_loader import format_metadata_from_config
@@ -585,7 +590,7 @@ def process_target(
             from .config_loader import format_metadata_from_config
             metadata = format_metadata_from_config(config_dict, query_config, country_config)
             
-            result = publish_to_agol(gdf, metadata, mode, gis)
+            result = publish_to_agol(gdf, metadata, mode, gis, use_async=use_async)
             total_published = len(gdf)
         
         # Generate execution summary for audit and monitoring
@@ -848,7 +853,7 @@ def arcgis_upload(
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
     staging_format: Annotated[StagingFormat, typer.Option("--staging-format", help="Format for staging data during append operations (geojson or gpkg)")] = StagingFormat.GEOJSON,
-    use_async: Annotated[bool, typer.Option("--use-async", help="Use asynchronous processing for large datasets")] = False,
+    use_async: Annotated[bool, typer.Option("--async", help="Use asynchronous processing for large datasets")] = False,
     use_analyze: Annotated[bool, typer.Option("--use-analyze/--no-analyze", help="Enable AGOL analyze for optimal parameters")] = True,
 ):
     """
@@ -972,36 +977,40 @@ def arcgis_upload(
         
         # Initialize feature layer manager
         publish_mode = Mode(mode)
-        publisher = FeatureLayerManager(gis, publish_mode)
+        publisher = FeatureLayerManager(gis, publish_mode, use_async=use_async)
         
-        # Create metadata from configuration templates
-        from .config_loader import format_metadata_from_config
-        metadata = format_metadata_from_config(config_dict, query_config, country_config)
-        
-        if isinstance(transformed_data, dict):
-            # Multi-layer service (education, health, markets)
-            item_id = publisher.publish_multi_layer_service(
-                layer_data=transformed_data,
-                service_name=f"{country_config.iso3.lower()}_{query_config.name}",
-                metadata=metadata,
-                mode=publish_mode
-            )
-        else:
-            # Single-layer service (roads, buildings, places) - using GeoPackage staging
-            item_id = publisher.publish_multi_layer_service(
-                layer_data=transformed_data,
-                service_name=f"{country_config.iso3.lower()}_{query_config.name}",
-                metadata=metadata,
-                mode=publish_mode
-            )
-        
-        if item_id:
-            logging.info(f"Successfully published: {item_id}")
-            print(f"Published item ID: {item_id}")
-        else:
-            logging.error("Failed to publish to AGOL")
-            cleanup_current_pid()
-            raise typer.Exit(1)
+        try:
+            # Create metadata from configuration templates
+            from .config_loader import format_metadata_from_config
+            metadata = format_metadata_from_config(config_dict, query_config, country_config)
+            
+            if isinstance(transformed_data, dict):
+                # Multi-layer service (education, health, markets)
+                item_id = publisher.publish_multi_layer_service(
+                    layer_data=transformed_data,
+                    service_name=f"{country_config.iso3.lower()}_{query_config.name}",
+                    metadata=metadata,
+                    mode=publish_mode
+                )
+            else:
+                # Single-layer service (roads, buildings, places) - using GeoPackage staging
+                item_id = publisher.publish_multi_layer_service(
+                    layer_data=transformed_data,
+                    service_name=f"{country_config.iso3.lower()}_{query_config.name}",
+                    metadata=metadata,
+                    mode=publish_mode
+                )
+            
+            if item_id:
+                logging.info(f"Successfully published: {item_id}")
+                print(f"Published item ID: {item_id}")
+            else:
+                logging.error("Failed to publish to AGOL")
+                cleanup_current_pid()
+                raise typer.Exit(1)
+        finally:
+            # Clean up publisher resources
+            publisher.close()
             
     except Exception as e:
         logging.error(f"Pipeline execution failed: {e}")
@@ -1441,7 +1450,7 @@ def overture_dump(
             missing_themes = []
             
             for theme_to_check in themes_to_download:
-                type_name = target_config['type'] if theme_to_check == theme else 'building'
+                type_name = query_config.type if theme_to_check == theme else 'building'
                 
                 # Check if cache exists for this country/theme combination
                 cache_entries = source.list_cached_countries(release)
@@ -1634,36 +1643,40 @@ def overture_dump(
             from .domain.enums import Mode
             publish_mode = Mode(mode)
             
-            publisher = FeatureLayerManager(gis, publish_mode)
+            publisher = FeatureLayerManager(gis, publish_mode, use_async=use_async)
             
-            # Create metadata from configuration templates
-            from .config_loader import format_metadata_from_config
-            metadata = format_metadata_from_config(config_dict, query_config, country_config)
-            
-            # Use parameters from CLI for flexibility
-            result = publisher.publish_multi_layer_service(
-                layer_data=transformed_data,
-                service_name=f"{country_config.iso3.lower()}_{query_config.name}",
-                metadata=metadata,
-                mode=publish_mode,
-                staging_format=staging_format
-            )
-            
-            # publish_multi_layer_service returns the published item, not a dict
-            if result:
-                # Extract layer info for display
-                layers_info = []
-                for layer_name, layer_gdf in transformed_data.items():
-                    layer_type = "points" if "places" in layer_name else "polygons"
-                    layers_info.append(f"Updated layer {country_config.iso3.lower()}_{query}_{layer_type} ({len(layer_gdf):,} features)")
+            try:
+                # Create metadata from configuration templates
+                from .config_loader import format_metadata_from_config
+                metadata = format_metadata_from_config(config_dict, query_config, country_config)
                 
-                for info in layers_info:
-                    pipeline_logger.info(info)
+                # Use parameters from CLI for flexibility
+                result = publisher.publish_multi_layer_service(
+                    layer_data=transformed_data,
+                    service_name=f"{country_config.iso3.lower()}_{query_config.name}",
+                    metadata=metadata,
+                    mode=publish_mode,
+                    staging_format=staging_format
+                )
                 
-                pipeline_logger.info(f"Multi-layer service published with item ID: {result}")
-            else:
-                pipeline_logger.info("Failed to publish service to ArcGIS Online")
-                raise typer.Exit(1)
+                # publish_multi_layer_service returns the published item, not a dict
+                if result:
+                    # Extract layer info for display
+                    layers_info = []
+                    for layer_name, layer_gdf in transformed_data.items():
+                        layer_type = "points" if "places" in layer_name else "polygons"
+                        layers_info.append(f"Updated layer {country_config.iso3.lower()}_{query}_{layer_type} ({len(layer_gdf):,} features)")
+                    
+                    for info in layers_info:
+                        pipeline_logger.info(info)
+                    
+                    pipeline_logger.info(f"Multi-layer service published with item ID: {result}")
+                else:
+                    pipeline_logger.info("Failed to publish service to ArcGIS Online")
+                    raise typer.Exit(1)
+            finally:
+                # Clean up publisher resources
+                publisher.close()
             
             # End Phase 3 for dual-theme
             phase_times['output'] = time.time() - phase4_start
@@ -1717,7 +1730,7 @@ def overture_dump(
             
             # Map mode string to Mode enum
             publish_mode = Mode(mode)
-            publisher = FeatureLayerManager(gis, publish_mode)
+            publisher = FeatureLayerManager(gis, publish_mode, use_async=use_async)
             
             # Create metadata from configuration
             from .config_loader import format_metadata_from_config
@@ -1741,6 +1754,9 @@ def overture_dump(
             except Exception as e:
                 logging.error(f"Failed to publish to ArcGIS Online: {e}")
                 raise typer.Exit(1)
+            finally:
+                # Clean up publisher resources
+                publisher.close()
             
             # End Phase 3 for single-theme
             phase_times['output'] = time.time() - phase4_start

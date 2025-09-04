@@ -19,7 +19,7 @@ roads:
     service_name: "{service_name}"
     
     # Tags: base + sector-specific
-    tags: "{tags_base} + ['transportation', 'roads']"
+    tags: "{tags_base} + ['transportation', 'roads', 'foundational_data']"
     
     # ESRI Enterprise Metadata
     access_information: "{access_information}"

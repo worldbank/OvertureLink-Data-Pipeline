@@ -24,6 +24,10 @@ from ..domain.models import Country, Query
 # Constants for AGOL compatibility
 AGOL_STRING_MAX = 255  # safe default for text fields
 
+# Geometry validation constants
+MIN_POLYGON_AREA = 1e-12  # Only remove truly degenerate polygons (~0.01 m² = 1 cm²)
+MIN_LINE_LENGTH = 1e-10   # Only remove truly degenerate lines (~1 mm globally)
+
 # AGOL reserved keywords and field name improvements
 RESERVED_KEYWORDS = {
     'select': 'select_field',
@@ -209,13 +213,22 @@ def _force_2d(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry]:
 
 
 def _make_valid_if_needed(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry]:
-    """Make invalid geometries valid using buffer(0) technique."""
+    """Make invalid geometries valid using GeoPandas make_valid()."""
     if geom is None:
         return None
     try:
-        return geom if geom.is_valid else geom.buffer(0)
-    except Exception:
+        if not geom.is_valid:
+            # Use make_valid() instead of buffer(0)
+            return geom.make_valid()
         return geom
+    except Exception:
+        # Fallback to buffer(0) only if make_valid fails
+        try:
+            return geom if geom.is_valid else geom.buffer(0)
+        except Exception:
+            return geom
+
+
 
 def _preserve_simple_polygon(geom: Optional[BaseGeometry]) -> Optional[BaseGeometry]:
     """
@@ -255,6 +268,14 @@ def enforce_geometry_rules(
         invalid = ~gdf.geometry.is_valid
         if invalid.any():
             gdf.loc[invalid, "geometry"] = gdf.loc[invalid, "geometry"].apply(_make_valid_if_needed)
+    
+    # Remove degenerate geometries based on improved thresholds
+    if expected == "polygons":
+        # Remove polygons with area below threshold
+        gdf = gdf[gdf.geometry.area > MIN_POLYGON_AREA]
+    elif expected == "lines":
+        # Remove lines with length below threshold  
+        gdf = gdf[gdf.geometry.length > MIN_LINE_LENGTH]
     
     # Filter by expected geometry family
     fam = {
@@ -473,7 +494,7 @@ def _normalize_buildings_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     elif "floor_count" in gdf.columns:
         result_gdf["floors"] = _safe_numeric_convert(gdf["floor_count"], int)
     
-    # Apply transform helpers before return
+    # Apply geometry validation
     result_gdf = enforce_geometry_rules(result_gdf, expected="polygons", validate_polygons=True)
 
     # Preserve simple Polygons as Polygon (avoid coercing everything to MultiPolygon)

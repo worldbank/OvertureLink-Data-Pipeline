@@ -103,12 +103,19 @@ def get_temp_dir() -> Path:
     return ensure_directory(temp_dir)
 
 
+def get_project_temp_dir() -> Path:
+    """Get the project's temp directory path."""
+    project_root = Path(__file__).parent.parent.parent
+    return project_root / "temp"
+
+
 def get_pid_temp_dir() -> Path:
-    """Get process-isolated temporary directory for pipeline operations."""
+    """Get process-isolated temp directory for current PID."""
     import os
-    import tempfile
-    temp_dir = Path(tempfile.gettempdir()) / "overture_pipeline" / f"pid_{os.getpid()}"
-    return ensure_directory(temp_dir)
+    temp_dir = get_project_temp_dir()
+    pid_dir = temp_dir / f"pid_{os.getpid()}"
+    pid_dir.mkdir(parents=True, exist_ok=True)
+    return pid_dir
 
 
 def clean_filename(filename: str) -> str:
