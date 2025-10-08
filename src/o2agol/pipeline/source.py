@@ -363,12 +363,12 @@ class OvertureSource:
             logging.info(f"Using bbox for {country.iso2}: {country.bounds}")
         
         # Apply common post-processing (eliminates duplication)
-        if query.category_filter:
-            spatial_sql += f" AND {query.category_filter}"
-            
+        if query.filter:
+            spatial_sql += f" AND d.{query.filter}"
+
         if limit:
             spatial_sql += f" LIMIT {limit}"
-            
+
         return spatial_sql
     
     def _build_divisions_spatial_filter(self, data_url: str, column_list: str, iso2: str, bounds: Optional[tuple[float, float, float, float]] = None) -> str:
