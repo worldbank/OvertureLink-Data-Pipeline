@@ -492,6 +492,7 @@ class FeatureLayerManager:
 
         # --- DISCOVERY: resolve existing service OR create it -----------------
         item = None
+        created_new_service = False
 
         # If caller provided a collection, keep it and load the item
         if flc is not None:
@@ -573,6 +574,7 @@ class FeatureLayerManager:
                     metadata=metadata or {},
                     staging_format=staging_format,
                 )
+                created_new_service = True
             else:
                 raise RuntimeError(f"Feature Service '{service_name}' not found. Create it before publishing.")
 
@@ -602,7 +604,10 @@ class FeatureLayerManager:
                 )
 
             target_layer = target_layers_by_name[key]
-            self.publish_or_update(target_layer, gdf, mode=mode)
+            layer_mode = mode
+            if created_new_service:
+                layer_mode = "initial"
+            self.publish_or_update(target_layer, gdf, mode=layer_mode)
 
         return existing_id
     

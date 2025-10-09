@@ -30,7 +30,7 @@ OVERTURE_COLUMNS = {
         'id',
         'names.primary as name',
         'class',
-        'subtype', 
+        'subtype',
         'version',
         # 'routes',  # Complex struct
         'geometry'
@@ -54,6 +54,15 @@ OVERTURE_COLUMNS = {
         # 'addresses',  # Complex struct array
         # 'websites',   # Array of strings
         # 'socials',    # Array of strings
+        'version',
+        'geometry'
+    ],
+    'infrastructure': [  # Infrastructure (power, communication, water, etc.)
+        'id',
+        'names.primary as name',
+        'subtype',
+        'class',
+        'height',
         'version',
         'geometry'
     ]
@@ -202,7 +211,6 @@ class OvertureSource:
     with automatic fallback between data sources.
     """
     
-    # Overture's six official themes (moved from DumpManager)
     OVERTURE_THEMES = [
         "addresses", "base", "buildings", 
         "divisions", "places", "transportation"
@@ -318,6 +326,21 @@ class OvertureSource:
             base_url = f"{base_url}/{release}"
             
         return f"{base_url}/theme={theme}/type={type_}/*.parquet"
+    
+    def _expected_columns_for_query(self, query: Query) -> set[str]:
+        """Resolve expected output columns for a query based on OVERTURE_COLUMNS."""
+        raw_columns = OVERTURE_COLUMNS.get(query.type, ['id', 'geometry'])
+        resolved: set[str] = set()
+        for col in raw_columns:
+            alias_candidate = col
+            lower_col = col.lower()
+            if ' as ' in lower_col:
+                alias_candidate = col.split(' as ', 1)[1]
+            if '.' in alias_candidate:
+                alias_candidate = alias_candidate.split('.')[-1]
+            resolved.add(alias_candidate.strip())
+        resolved.add('geometry')
+        return resolved
         
     def _get_country_bboxes(self) -> dict[str, tuple[float, float, float, float]]:
         """Get country bounding boxes from registry for spatial filtering."""
@@ -694,6 +717,12 @@ class OvertureSource:
         """
         # Implement cache->dump->S3 fallback logic
         
+        # Split mixed-geometry layers before dual-theme handling
+        if getattr(query, "geometry_split", False):
+            logging.info("Geometry split enabled: separating points, lines, and polygons")
+            gdf = self._read_single_layer_with_fallback(query, country, clip)
+            return self._split_geometry_layers(query, gdf)
+        
         # Check if this is a multi-layer query (places + buildings)
         if query.is_multilayer:
             logging.info("Multi-layer query detected: fetching both places and buildings")
@@ -706,6 +735,9 @@ class OvertureSource:
         """
         Read single-layer data with cache->dump->S3 fallback logic.
         """
+        expected_columns = self._expected_columns_for_query(query)
+        configured_release = None
+        
         # Step 1: Try cache first (if enabled)
         if self._enable_cache:
             try:
@@ -724,8 +756,26 @@ class OvertureSource:
                 )
                 cached_data = self.get_cached_data(cache_query)
                 if cached_data is not None:
-                    logging.info(f"Cache hit: using cached data for {country.iso2}/{query.theme}/{query.type}")
-                    return cached_data
+                    missing_cols = expected_columns - set(cached_data.columns)
+                    if missing_cols:
+                        logging.warning(
+                            f"Cached data for {country.iso2}/{query.theme}/{query.type} missing columns {missing_cols}; refreshing cache"
+                        )
+                        try:
+                            refreshed = self.cache_country_data(cache_query, overwrite=True)
+                        except Exception as refresh_error:
+                            logging.warning(f"Cache refresh failed: {refresh_error}")
+                        else:
+                            refreshed_missing = expected_columns - set(refreshed.columns)
+                            if not refreshed_missing:
+                                logging.info("Cache refresh succeeded with complete columns")
+                                return refreshed
+                            logging.warning(
+                                f"Refreshed cache still missing columns {refreshed_missing}; falling back to next data source"
+                            )
+                    else:
+                        logging.info(f"Cache hit: using cached data for {country.iso2}/{query.theme}/{query.type}")
+                        return cached_data
                     
                 logging.debug(f"Cache miss for {country.iso2}/{query.theme}/{query.type}")
             except Exception as e:
@@ -750,7 +800,13 @@ class OvertureSource:
                         limit=self.run.limit,
                         filters=query.filter
                     )
-                    return gdf
+                    missing_cols = expected_columns - set(gdf.columns)
+                    if missing_cols:
+                        logging.warning(
+                            f"Dump data missing columns {missing_cols}; falling back to S3 for {country.iso2}/{query.theme}/{query.type}"
+                        )
+                    else:
+                        return gdf
                 else:
                     logging.debug(f"No local dump available for {query.theme}")
             except Exception as e:
@@ -759,11 +815,16 @@ class OvertureSource:
         # Step 3: Fall back to direct S3 query (original logic)
         logging.info(f"Using direct S3 query for {country.iso2}/{query.theme}/{query.type}")
         gdf = self._execute_s3_query_with_retry(query, country, clip)
+        missing_cols = expected_columns - set(gdf.columns)
+        if missing_cols:
+            logging.warning(f"S3 query result missing expected columns {missing_cols}")
         
         # Cache the result for future use (essential for overture-dump functionality)
         if self._enable_cache and gdf is not None and len(gdf) > 0:
             try:
                 logging.info(f"Caching S3 query result for future use: {country.iso2}/{query.theme}/{query.type}")
+                if configured_release is None:
+                    configured_release = self.cfg.get('overture', {}).get('release')
                 cache_query = CacheQuery(
                     country=country.iso2,
                     theme=query.theme,
@@ -831,6 +892,45 @@ class OvertureSource:
             # Use single-layer fallback logic for each component
             gdf = self._read_single_layer_with_fallback(single_query, country, clip)
             results[theme] = gdf
+        
+        return results
+    
+    def _split_geometry_layers(self, query: Query, gdf: gpd.GeoDataFrame) -> dict[str, gpd.GeoDataFrame]:
+        """
+        Split a GeoDataFrame into geometry-specific layers for publishing.
+        """
+        if gdf.empty:
+            logging.info("No features returned for geometry split")
+            return {}
+        
+        families = {
+            "points": {"Point", "MultiPoint"},
+            "lines": {"LineString", "MultiLineString"},
+            "polygons": {"Polygon", "MultiPolygon"}
+        }
+        
+        geom_types = gdf.geometry.geom_type.fillna("Unknown")
+        used_mask = pd.Series(False, index=gdf.index)
+        results: dict[str, gpd.GeoDataFrame] = {}
+        
+        for family, valid_types in families.items():
+            mask = geom_types.isin(valid_types)
+            if not mask.any():
+                continue
+            
+            subset = gdf.loc[mask].copy()
+            subset["geometry_family"] = family
+            subset["source_type"] = family  # downstream transformer expects feature_type from source_type
+            results[f"{query.name}_{family}"] = subset
+            used_mask |= mask
+            logging.info(f"{query.name}: {len(subset):,} {family}")
+        
+        leftover_mask = ~used_mask
+        if leftover_mask.any():
+            remainder = gdf.loc[leftover_mask].copy()
+            remainder["geometry_family"] = "other"
+            results[f"{query.name}_other"] = remainder
+            logging.warning(f"{query.name}: {len(remainder):,} features with unsupported geometry types")
         
         return results
     

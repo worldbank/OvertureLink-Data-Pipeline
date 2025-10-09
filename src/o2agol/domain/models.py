@@ -32,6 +32,7 @@ class Query(BaseModel):
     theme: str = Field(..., description="Overture theme (transportation, buildings, places)")
     type: str = Field(..., description="Overture data type (segment, building, place)")
     is_multilayer: bool = Field(default=False, description="Whether query produces multiple layers")
+    geometry_split: bool = Field(default=False, description="Split output by geometry family")
     
     # Filter configuration
     filter: Optional[str] = Field(None, description="Primary filter expression")

@@ -1562,7 +1562,8 @@ def overture_dump(
             filter=getattr(query_config, 'filter', None),
             building_filter=building_filter,
             name=query,
-            is_multilayer=bool(building_filter)
+            is_multilayer=query_config.is_multilayer,
+            geometry_split=getattr(query_config, "geometry_split", False)
         )
         
         # === PHASE 1: DATA ACQUISITION ===

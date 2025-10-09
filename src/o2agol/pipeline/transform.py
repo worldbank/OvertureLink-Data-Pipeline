@@ -99,7 +99,8 @@ PREFERRED_ORDER = [
     "name",  
     "road_class", "road_type",
     "building_class", "building_type", "height_m", "floors",
-    "feature_type", "name_primary", "name_common",
+    "feature_type", "infra_class", "infra_type",
+    "name_primary", "name_common",
     "category_primary", "category_alternate",
     "address_full", "address_locality", "address_country",
     "website", "email", "phone",
@@ -189,6 +190,8 @@ class Transformer:
             return 'roads'
         elif 'building' in query_name or self.query.theme == 'buildings':
             return 'buildings'
+        elif 'power' in query_name or getattr(self.query, "geometry_split", False):
+            return 'power'  # type: ignore[return-value]
         elif query_name in ['education', 'health', 'markets']:
             return query_name  # type: ignore[return-value]
         elif 'place' in query_name or self.query.theme == 'places':
@@ -338,7 +341,7 @@ def order_columns_for_publish(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 def normalize_schema(
     gdf: gpd.GeoDataFrame, 
-    layer: Literal["roads", "buildings", "education", "health", "markets", "places"]
+    layer: Literal["roads", "buildings", "education", "health", "markets", "places", "power"]
 ) -> gpd.GeoDataFrame:
     """
     Normalize Overture data schema to AGOL-compatible flat structure.
@@ -365,7 +368,7 @@ def normalize_schema(
     elif layer == "buildings":
         result_gdf = _normalize_buildings_schema(result_gdf)
         
-    elif layer in ["education", "health", "markets", "places"]:
+    elif layer in ["education", "health", "markets", "power", "places"]:
         result_gdf = _normalize_places_schema(result_gdf)
     
     else:
@@ -556,6 +559,9 @@ def _normalize_places_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     # Add building-specific fields for mixed data
     if "class" in gdf.columns:
         result_gdf["building_class"] = gdf["class"].astype(str)
+        result_gdf["infra_class"] = gdf["class"].astype(str)
+    if "subtype" in gdf.columns:
+        result_gdf["infra_type"] = gdf["subtype"].astype(str)
     if "height" in gdf.columns:
         result_gdf["height_m"] = _safe_numeric_convert(gdf["height"], float)
     

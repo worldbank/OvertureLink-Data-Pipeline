@@ -81,12 +81,15 @@ def load_config(
         use_bbox=False
     )
     
+    geometry_split = bool(query_config.get('geometry_split'))
+    
     domain_query = DomainQuery(
         theme=query_config['theme'],
         type=query_config['type'],
         filter=query_config.get('filter'),
         name=query,
-        is_multilayer=bool(query_config.get('building_filter')),
+        is_multilayer=bool(query_config.get('building_filter')) or geometry_split,
+        geometry_split=geometry_split,
         # Filter configuration
         building_filter=query_config.get('building_filter'),
         category_filter=query_config.get('filter'),  # Use filter as category_filter
