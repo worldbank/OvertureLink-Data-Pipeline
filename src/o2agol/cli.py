@@ -1055,6 +1055,7 @@ def export_data_command(
         o2agol export places roads.gpkg --country afg --raw    # Raw data with custom filename
         o2agol export education --country pak --format fgdb    # Multi-layer FGDB
     """
+    
     # Validate --dry-run is not used with export
     if dry_run:
         typer.echo("ERROR: --dry-run is not supported with export command. Use it with arcgis-upload instead.", err=True)
@@ -1064,6 +1065,7 @@ def export_data_command(
     if output_path and not format:
         from .domain.enums import ExportFormat
         format = ExportFormat.from_extension(output_path).value
+    
     
     # Validate that the query exists in the configuration
     if not validate_query_exists(config, query):
@@ -1079,6 +1081,7 @@ def export_data_command(
             typer.echo(f"ERROR loading configuration: {e}", err=True)
         raise typer.Exit(1)
     
+    
     # Use new pipeline architecture for clean execution
     try:
         # Setup logging based on user preferences
@@ -1092,13 +1095,18 @@ def export_data_command(
         from .pipeline.source import OvertureSource
         from .pipeline.transform import Transformer
         
+        
+
         # Load configuration using new typed system
         config_dict, run_options, query_config, country_config = load_config(
             query=query,
             country=country or iso2,  # Support both --country and legacy --iso2
-            config_path=config
+            config_path=config,
+            load_agol_config=False  # AGOL config not needed for export
         )
         
+        
+
         # Update run options with CLI parameters for export
         from .domain.models import RunOptions
         run_options = RunOptions(

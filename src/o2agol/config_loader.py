@@ -27,7 +27,8 @@ from .domain.models import RunOptions
 def load_config(
     query: str, 
     country: str, 
-    config_path: str = None
+    config_path: str = None,
+    load_agol_config: bool = True
 ) -> tuple[dict[str, Any], RunOptions, DomainQuery, DomainCountry]:
     """
     Load and merge configuration from all sources.
@@ -44,6 +45,7 @@ def load_config(
         - query_obj: Query domain object with metadata
         - country_obj: Country domain object
     """
+    
     # Set default config path if not provided
     if config_path is None:
         config_path = Path(__file__).parent / "data" / "agol_metadata.yml"
@@ -53,6 +55,7 @@ def load_config(
     # Load AGOL metadata configuration
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    
     
     with open(config_path, encoding='utf-8') as f:
         agol_config = yaml.safe_load(f)
@@ -103,6 +106,7 @@ def load_config(
         data_type=query_config.get('data_type')
     )
     
+    
     domain_country = DomainCountry(
         name=country_info.name,
         iso2=country_info.iso2,
@@ -110,9 +114,11 @@ def load_config(
         bounds=CountryRegistry.get_bounding_boxes().get(country_info.iso2, (0, 0, 0, 0))
     )
     
+    
     # Merge configurations - add overture config from environment variable
     # This ensures all components use the same release from OVERTURE_RELEASE env var
-    overture_config = Config().overture
+    overture_config = Config(validate_on_init=load_agol_config).overture
+    
     cfg = {
         **agol_config,
         'query': query_config,
