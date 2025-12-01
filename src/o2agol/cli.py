@@ -3,7 +3,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Optional, cast
 
 import typer
 import yaml
@@ -15,7 +15,7 @@ load_dotenv()
 from .cleanup import full_cleanup_check, register_cleanup_handlers, cleanup_current_pid
 from .config.settings import Config, PipelineLogger
 from .config_loader import get_available_queries, load_config, validate_query_exists
-from .domain.enums import ClipStrategy, StagingFormat
+from .domain.enums import ClipStrategy, ExportFormat, StagingFormat
 from .domain.models import Country, Query, RunOptions
 from .pipeline.export import Exporter, generate_export_filename
 from .pipeline.publish import FeatureLayerManager
@@ -59,7 +59,14 @@ def fetch_data(
         raise
 
 
-def publish_to_agol(gdf, metadata: dict, mode: str, gis, use_async: bool = False) -> str:
+def publish_to_agol(
+    gdf,
+    metadata: dict,
+    mode: str,
+    gis,
+    staging_format: StagingFormat = StagingFormat.GPKG,
+    use_async: bool = False,
+) -> str:
     """
     Publish GeoDataFrame to ArcGIS Online using GeoPackage staging.
     Uses publish_multi_layer_service for consistent 45x faster uploads.
@@ -71,7 +78,14 @@ def publish_to_agol(gdf, metadata: dict, mode: str, gis, use_async: bool = False
         manager = FeatureLayerManager(gis, publish_mode, use_async=use_async)
         
         service_name = metadata.get('title', 'default_layer')
-        result = manager.publish_multi_layer_service(gdf, service_name, metadata, publish_mode)
+        staging = StagingFormat(staging_format)
+        result = manager.publish_multi_layer_service(
+            layer_data=gdf,
+            service_name=service_name,
+            metadata=metadata,
+            mode=publish_mode,
+            staging_format=staging,
+        )
         return result
         
     except Exception as e:
@@ -134,6 +148,19 @@ def is_template_config(config_path: str) -> bool:
         return 'templates' in config
     except Exception:
         return False
+
+
+def infer_export_format_from_path(path: str) -> Optional[ExportFormat]:
+    """Infer export format from a file path extension."""
+    suffix = Path(path).suffix.lower()
+    mapping: dict[str, ExportFormat] = {
+        ".geojson": ExportFormat.GEOJSON,
+        ".json": ExportFormat.GEOJSON,
+        ".gpkg": ExportFormat.GPKG,
+        ".gdb": ExportFormat.FGDB,
+        ".fgdb": ExportFormat.FGDB,
+    }
+    return mapping.get(suffix)
 
 
 def load_pipeline_config(config_path: str, country_override: str = None) -> dict[str, Any]:
@@ -330,7 +357,7 @@ def process_target(
     log_to_file: bool = False,
     country: Optional[str] = None,
     skip_cleanup: bool = False,
-    staging_format: StagingFormat = StagingFormat.GEOJSON,
+    format: StagingFormat = StagingFormat.GEOJSON,
     use_async: bool = False,
     use_analyze: bool = True,
 ):
@@ -538,10 +565,28 @@ def process_target(
             logging.info("GEOJSON EXPORT PHASE")
             logging.info("=" * 50)
             
+            if not output_path:
+                raise ValueError("output_path is required for geojson export mode")
+            
+            # Use the new Exporter class for GeoJSON export
+            exporter = Exporter(out_path=Path(output_path))
+            
             if is_dual_query:
-                export_to_geojson(normalized_data, output_path, target_name)
+                exporter.write(
+                    data=normalized_data,
+                    base_name=Path(output_path).stem,
+                    out_dir=Path(output_path).parent,
+                    multilayer=True,
+                    raw=False
+                )
             else:
-                export_to_geojson(gdf, output_path, target_name)
+                exporter.write(
+                    data=gdf,
+                    base_name=Path(output_path).stem,
+                    out_dir=Path(output_path).parent,
+                    multilayer=False,
+                    raw=False
+                )
             
             logging.info("GeoJSON export completed successfully")
             return
@@ -578,7 +623,8 @@ def process_target(
                 layer_data=normalized_data,
                 service_name=f"{country_config.iso3.lower()}_{query_config.name}",
                 metadata=metadata,
-                mode=publish_mode
+                mode=publish_mode,
+                staging_format=format
             )
             total_published = sum(len(gdf) for gdf in normalized_data.values())
         else:
@@ -590,7 +636,14 @@ def process_target(
             from .config_loader import format_metadata_from_config
             metadata = format_metadata_from_config(config_dict, query_config, country_config)
             
-            result = publish_to_agol(gdf, metadata, mode, gis, use_async=use_async)
+            result = publish_to_agol(
+                gdf,
+                metadata,
+                mode,
+                gis,
+                staging_format=format,
+                use_async=use_async,
+            )
             total_published = len(gdf)
         
         # Generate execution summary for audit and monitoring
@@ -852,7 +905,7 @@ def arcgis_upload(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
-    staging_format: Annotated[StagingFormat, typer.Option("--staging-format", help="Format for staging data during append operations (geojson or gpkg)")] = StagingFormat.GEOJSON,
+    format: Annotated[StagingFormat, typer.Option("--format", "--staging-format", help="Format for staging data during append operations (geojson, gpkg, fgdb)")] = StagingFormat.GEOJSON,
     use_async: Annotated[bool, typer.Option("--async", help="Use asynchronous processing for large datasets")] = False,
     use_analyze: Annotated[bool, typer.Option("--use-analyze/--no-analyze", help="Enable AGOL analyze for optimal parameters")] = True,
 ):
@@ -892,8 +945,8 @@ def arcgis_upload(
     logging.info(f"Executing Overture query: {query}")
     
     # Validate staging format for append operations
-    if mode == "append" and staging_format not in [StagingFormat.GEOJSON, StagingFormat.GPKG]:
-        logging.error(f"Invalid staging format '{staging_format}' for append mode. Must be 'geojson' or 'gpkg'")
+    if mode == "append" and format not in [StagingFormat.GEOJSON, StagingFormat.GPKG]:
+        logging.error(f"Invalid staging format '{format}' for append mode. Must be 'geojson' or 'gpkg'")
         raise typer.Exit(1)
     
     # Use new pipeline architecture for clean execution
@@ -990,7 +1043,8 @@ def arcgis_upload(
                     layer_data=transformed_data,
                     service_name=f"{country_config.iso3.lower()}_{query_config.name}",
                     metadata=metadata,
-                    mode=publish_mode
+                    mode=publish_mode,
+                    staging_format=format
                 )
             else:
                 # Single-layer service (roads, buildings, places) - using GeoPackage staging
@@ -998,7 +1052,8 @@ def arcgis_upload(
                     layer_data=transformed_data,
                     service_name=f"{country_config.iso3.lower()}_{query_config.name}",
                     metadata=metadata,
-                    mode=publish_mode
+                    mode=publish_mode,
+                    staging_format=format
                 )
             
             if item_id:
@@ -1266,16 +1321,18 @@ def list_queries(
 
 
 @app.command("overture-dump")
+@app.command("overture-dump")
 def overture_dump(
     query: Annotated[str, typer.Argument(help="Query type to execute. Use 'list-queries' command to see available options.")],
+    output_path: Annotated[Optional[str], typer.Argument(help="Output file path (optional - export to file instead of AGOL upload)")] = None,
     config: Annotated[str, typer.Option("--config", "-c", help="Path to YAML configuration file")] = "src/o2agol/data/agol_metadata.yml",
     country: Annotated[Optional[str], typer.Option("--country", help="Country code/name (e.g., 'af', 'afg', 'Afghanistan')")] = None,
     mode: Annotated[str, typer.Option("--mode", "-m", help="Processing mode: auto (smart detection) | initial | overwrite | append")] = "auto",
     download_only: Annotated[bool, typer.Option("--download-only", help="Only download dump without processing")] = False,
     use_local: Annotated[bool, typer.Option("--use-local/--use-s3", help="Use local dump if available")] = True,
     force_download: Annotated[bool, typer.Option("--force-download", help="Force re-download even if dump exists")] = False,
-    release: Annotated[str, typer.Option("--release", help="Overture release version")] = None,
-    staging_format: Annotated[str, typer.Option("--format", help="Staging format for AGOL upload: geojson, gpkg, or fgdb")] = "gpkg",
+    release: Annotated[Optional[str], typer.Option("--release", help="Overture release version")] = None,
+    format: Annotated[str, typer.Option("--format", help="Output format: geojson, gpkg, or fgdb (for file export) OR staging format for AGOL upload")] = "gpkg",
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
@@ -1297,7 +1354,7 @@ def overture_dump(
     DuckDB streaming extraction from Overture's S3 buckets.
     
     Examples:
-        Cache and process data for a country:
+        Cache and process data for a country (AGOL upload):
             o2agol overture-dump roads --country afg
             o2agol overture-dump roads --country pak  # Each country cached separately
             
@@ -1308,32 +1365,66 @@ def overture_dump(
         Force refresh cache:
             o2agol overture-dump buildings --country afg --force-download
             
-        Export to GeoJSON instead of AGOL:
+        Export to file instead of AGOL upload:
             o2agol overture-dump places --country afg --format geojson
+            o2agol overture-dump roads afg_roads.gpkg --country afg --format gpkg
             
         Cache only without processing:
             o2agol overture-dump roads --country afg --download-only
     """
-    # Validate query exists
-    if not validate_query_exists(config, query):
+    # Determine operation mode: file export or AGOL upload
+    is_file_export = output_path is not None
+
+    # Normalize format input
+    format = (format or "").lower()
+    export_format: Optional[ExportFormat] = None
+    staging_format: Optional[StagingFormat] = None
+    inferred_from_path = infer_export_format_from_path(output_path) if output_path else None
+
+    if is_file_export:
         try:
-            available_queries = get_available_queries(config)
-            typer.echo(f"ERROR: Query '{query}' not found in configuration file '{config}'", err=True)
-            typer.echo(f"\nAvailable queries: {', '.join(sorted(available_queries))}", err=True)
-        except (FileNotFoundError, ValueError) as e:
-            typer.echo(f"ERROR loading configuration: {e}", err=True)
-        raise typer.Exit(1)
-    
-    # Validate mode parameter
-    valid_modes = ["auto", "initial", "overwrite", "append"]
-    if mode not in valid_modes:
-        typer.echo(f"ERROR: --mode must be one of: {', '.join(valid_modes)}", err=True)
-        raise typer.Exit(1)
-    
-    # Validate staging format
-    if staging_format not in ["geojson", "gpkg", "fgdb"]:
-        typer.echo("ERROR: --format must be 'geojson', 'gpkg', or 'fgdb'", err=True)
-        raise typer.Exit(1)
+            export_format = ExportFormat(format)
+        except ValueError:
+            if inferred_from_path:
+                export_format = inferred_from_path
+                format = export_format.value
+            else:
+                valid_formats = ", ".join(fmt.value for fmt in ExportFormat)
+                typer.echo(f"ERROR: --format must be one of: {valid_formats}", err=True)
+                raise typer.Exit(1)
+        else:
+            if inferred_from_path and inferred_from_path != export_format:
+                logging.warning(
+                    "Output path extension (%s) implies %s but --format is %s. Using the extension-derived format.",
+                    Path(output_path).suffix,
+                    inferred_from_path.value.upper(),
+                    export_format.value.upper(),
+                )
+                export_format = inferred_from_path
+                format = export_format.value
+    else:
+        try:
+            staging_format = StagingFormat(format)
+        except ValueError:
+            valid_formats = ", ".join(fmt.value for fmt in StagingFormat)
+            typer.echo(
+                f"ERROR: --format must be one of: {valid_formats} for AGOL upload",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+    selected_format = export_format if is_file_export else staging_format
+    if selected_format is None:
+        # Fallback for cases where inference set the value but enum not assigned yet
+        selected_format = ExportFormat(format) if is_file_export else StagingFormat(format)
+
+    if is_file_export:
+        export_format = cast(ExportFormat, selected_format)
+    else:
+        staging_format = cast(StagingFormat, selected_format)
+
+    format = selected_format.value  # Use normalized value for subsequent logging
+    format_display = selected_format.value.upper()
     
     if not country:
         typer.echo("ERROR: --country is required for dump processing", err=True)
@@ -1386,7 +1477,10 @@ def overture_dump(
     
     # Start overall timing
     operation_start_time = time.time()
-    operation_mode = f"AGOL upload (staging as {staging_format.upper()})"
+    if is_file_export:
+        operation_mode = f"file export ({format_display})"
+    else:
+        operation_mode = f"AGOL upload (staging as {format_display})"
     logging.info(f"Starting {operation_mode} operation: {query} for {country}")
     logging.info(f"Execution timestamp: {datetime.now()}")
 
@@ -1624,8 +1718,54 @@ def overture_dump(
             # === PHASE 3: OUTPUT ===
             phase4_start = time.time()
             pipeline_logger.info("")
+            
+            if is_file_export:
+                # File export mode
+                pipeline_logger.phase("PHASE 3: FILE EXPORT")
+                pipeline_logger.info(f"Exporting to {format_display} file: {output_path}")
+                
+                # Use the Exporter class for file export
+                from .pipeline.export import Exporter
+                exporter = Exporter(out_path=Path(output_path), fmt=export_format)
+                
+                if isinstance(transformed_data, dict):
+                    # Multi-layer export
+                    exporter.write(
+                        data=transformed_data,
+                        base_name=Path(output_path).stem,
+                        out_dir=Path(output_path).parent,
+                        multilayer=True,
+                        raw=False
+                    )
+                else:
+                    # Single layer export
+                    exporter.write(
+                        data=transformed_data,
+                        base_name=Path(output_path).stem,
+                        out_dir=Path(output_path).parent,
+                        multilayer=False,
+                        raw=False
+                    )
+                
+                pipeline_logger.info(f"Successfully exported to {output_path} ({format})")
+                phase_times['output'] = time.time() - phase4_start
+                pipeline_logger.info(f"Phase completed in {format_duration(phase_times['output'])}")
+                
+                # Log completion and exit
+                total_time = time.time() - operation_start_time
+                pipeline_logger.info("")
+                pipeline_logger.info("=" * 60)
+                pipeline_logger.info(f"{operation_mode.upper()} COMPLETED SUCCESSFULLY")
+                pipeline_logger.info("=" * 60)
+                pipeline_logger.info(f"Total execution time: {format_duration(total_time)}")
+                pipeline_logger.info(f"Features processed: {total_features:,}")
+                pipeline_logger.info(f"Output file: {output_path}")
+                pipeline_logger.info("Operation completed successfully")
+                return
+            
+            # AGOL upload mode
             pipeline_logger.phase("PHASE 3: AGOL PUBLISHING")
-            pipeline_logger.info(f"Publishing to ArcGIS Online using {staging_format.upper()} staging")
+            pipeline_logger.info(f"Publishing to ArcGIS Online using {format_display} staging")
             
             # Always publish to AGOL - overture-dump is for AGOL uploads only
             if config_dict.get('config_format') == 'template':
@@ -1657,7 +1797,7 @@ def overture_dump(
                     service_name=f"{country_config.iso3.lower()}_{query_config.name}",
                     metadata=metadata,
                     mode=publish_mode,
-                    staging_format=staging_format
+                    staging_format=staging_format or StagingFormat(format)
                 )
                 
                 # publish_multi_layer_service returns the published item, not a dict
@@ -1716,8 +1856,54 @@ def overture_dump(
             # === PHASE 3: OUTPUT ===
             phase4_start = time.time()
             pipeline_logger.info("")
+            
+            if is_file_export:
+                # File export mode
+                pipeline_logger.phase("PHASE 3: FILE EXPORT")
+                pipeline_logger.info(f"Exporting to {format_display} file: {output_path}")
+                
+                # Use the Exporter class for file export
+                from .pipeline.export import Exporter
+                exporter = Exporter(out_path=Path(output_path), fmt=export_format)
+                
+                if isinstance(gdf_transformed, dict):
+                    # Multi-layer export
+                    exporter.write(
+                        data=gdf_transformed,
+                        base_name=Path(output_path).stem,
+                        out_dir=Path(output_path).parent,
+                        multilayer=True,
+                        raw=False
+                    )
+                else:
+                    # Single layer export
+                    exporter.write(
+                        data=gdf_transformed,
+                        base_name=Path(output_path).stem,
+                        out_dir=Path(output_path).parent,
+                        multilayer=False,
+                        raw=False
+                    )
+                
+                pipeline_logger.info(f"Successfully exported to {output_path} ({format})")
+                phase_times['output'] = time.time() - phase4_start
+                pipeline_logger.info(f"Phase completed in {format_duration(phase_times['output'])}")
+                
+                # Log completion and exit
+                total_time = time.time() - operation_start_time
+                pipeline_logger.info("")
+                pipeline_logger.info("=" * 60)
+                pipeline_logger.info(f"{operation_mode.upper()} COMPLETED SUCCESSFULLY")
+                pipeline_logger.info("=" * 60)
+                pipeline_logger.info(f"Total execution time: {format_duration(total_time)}")
+                pipeline_logger.info(f"Features processed: {len(gdf):,}")
+                pipeline_logger.info(f"Output file: {output_path}")
+                pipeline_logger.info("Operation completed successfully")
+                return
+            
+            # AGOL upload mode
             pipeline_logger.phase("PHASE 3: AGOL PUBLISHING")
-            pipeline_logger.info(f"Publishing to ArcGIS Online using {staging_format.upper()} staging")
+            pipeline_logger.info(f"Publishing to ArcGIS Online using {format_display} staging")
             
             # Always publish to AGOL - overture-dump is for AGOL uploads only
             # Publish the already-transformed data directly to avoid duplicate processing
@@ -1744,7 +1930,7 @@ def overture_dump(
                     service_name=f"{country_config.iso3.lower()}_{query_config.name}",
                     metadata=metadata,
                     mode=publish_mode,
-                    staging_format=staging_format
+                    staging_format=staging_format or StagingFormat(format)
                 )
                 
                 if result:

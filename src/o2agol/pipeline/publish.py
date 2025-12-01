@@ -110,6 +110,22 @@ class FeatureLayerManager:
 
         return df
 
+    def _normalize_staging_format(self, staging_format: Any | None) -> str:
+        """Normalize staging_format inputs (enum/string) to a supported lowercase string."""
+        if staging_format is None:
+            value = StagingFormat.GPKG
+        else:
+            value = getattr(staging_format, "value", staging_format)
+
+        if not isinstance(value, str):
+            raise ValueError(f"Unsupported staging_format type: {type(value)}")
+
+        fmt = value.lower().strip()
+        allowed = {StagingFormat.GPKG, StagingFormat.GEOJSON, StagingFormat.FGDB}
+        if fmt not in allowed:
+            raise ValueError(f"Unsupported staging_format: {value}")
+        return fmt
+
     def _create_service_if_missing(
         self,
         service_name: str,
@@ -266,7 +282,7 @@ class FeatureLayerManager:
         self,
         feature_layer,
         gdf: gpd.GeoDataFrame,
-        staging_format: str = StagingFormat.GPKG,
+        staging_format: Any | None = StagingFormat.GPKG,
         use_async: Optional[bool] = None
     ) -> bool:
         """
@@ -285,7 +301,7 @@ class FeatureLayerManager:
         exporter = Exporter()
         layer_name = "features"
 
-        fmt = staging_format.lower()
+        fmt = self._normalize_staging_format(staging_format)
         if fmt == "gpkg":
             staging_file = exporter.create_staging_file(gdf, layer_name, "gpkg")
             item_type, upload_format, source_table_name = "GeoPackage", "geoPackage", layer_name
@@ -365,7 +381,7 @@ class FeatureLayerManager:
         feature_layer,
         gdf: gpd.GeoDataFrame,
         batch_size: int,
-        staging_format: str = StagingFormat.GPKG
+        staging_format: Any | None = StagingFormat.GPKG
     ) -> None:
         """Append large data in big server-side jobs, adapting on payload/time errors."""
         total = len(gdf)
@@ -377,6 +393,7 @@ class FeatureLayerManager:
         start = 0
         part = 0
         bs = max(1, batch_size)
+        fmt = self._normalize_staging_format(staging_format)
 
         while start < total:
             end = min(start + bs, total)
@@ -385,7 +402,7 @@ class FeatureLayerManager:
 
             logger.info(f"[append] part {part}: {len(part_gdf):,} features (window {start}:{end}, batch={bs:,})")
             try:
-                self._append_via_item_hardened(feature_layer, part_gdf, staging_format=staging_format, use_async=self.use_async)
+                self._append_via_item_hardened(feature_layer, part_gdf, staging_format=fmt, use_async=self.use_async)
                 start = end
 
             except Exception as e:
@@ -402,7 +419,12 @@ class FeatureLayerManager:
     # ----------------------------
     # Initial / Overwrite / Append
     # ----------------------------
-    def _initial_with_seed_and_append(self, feature_layer, prepared_gdf: gpd.GeoDataFrame) -> None:
+    def _initial_with_seed_and_append(
+        self,
+        feature_layer,
+        prepared_gdf: gpd.GeoDataFrame,
+        staging_format: Any | None = StagingFormat.GPKG,
+    ) -> None:
         total = len(prepared_gdf)
         if total == 0:
             logger.info("Nothing to publish (no features).")
@@ -412,22 +434,24 @@ class FeatureLayerManager:
         seed = prepared_gdf.iloc[:seed_count].copy()
         rest = prepared_gdf.iloc[seed_count:].copy()
 
+        fmt = self._normalize_staging_format(staging_format)
         logger.info(f"Seeding {seed_count:,} features to initialize schema...")
-        self._append_via_item_hardened(feature_layer, seed, staging_format=StagingFormat.GPKG, use_async=self.use_async)
+        self._append_via_item_hardened(feature_layer, seed, staging_format=fmt, use_async=self.use_async)
 
         if len(rest) > 0:
             if len(rest) >= BATCH_THRESHOLD:
                 logger.info(f"Bulk appending remaining {len(rest):,} features in batches...")
-                self._append_via_batches(feature_layer, rest, batch_size=BATCH_SIZE, staging_format=StagingFormat.GPKG)
+                self._append_via_batches(feature_layer, rest, batch_size=BATCH_SIZE, staging_format=fmt)
             else:
                 logger.info(f"Appending remaining {len(rest):,} features in a single job...")
-                self._append_via_item_hardened(feature_layer, rest, staging_format=StagingFormat.GPKG, use_async=self.use_async)
+                self._append_via_item_hardened(feature_layer, rest, staging_format=fmt, use_async=self.use_async)
 
     def publish_or_update(
         self,
         feature_layer,
         prepared_gdf: gpd.GeoDataFrame,
-        mode: str = "auto"
+        mode: str = "auto",
+        staging_format: Any | None = StagingFormat.GPKG
     ) -> None:
         """
         Unified orchestrator per sublayer:
@@ -436,10 +460,11 @@ class FeatureLayerManager:
           - append: (batched) append
         """
         gdf = self._ensure_geodataframe_with_geometry(prepared_gdf)
+        fmt = self._normalize_staging_format(staging_format)
 
         m = (mode or self.mode or "auto").lower()
         if m == "initial":
-            self._initial_with_seed_and_append(feature_layer, gdf)
+            self._initial_with_seed_and_append(feature_layer, gdf, staging_format=fmt)
             return
 
         if m == "overwrite":
@@ -447,9 +472,9 @@ class FeatureLayerManager:
             feature_layer.manager.truncate()
             # big vs small
             if len(gdf) >= BATCH_THRESHOLD:
-                self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=StagingFormat.GPKG)
+                self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=fmt)
             else:
-                self._append_via_item_hardened(feature_layer, gdf, staging_format=StagingFormat.GPKG, use_async=self.use_async)
+                self._append_via_item_hardened(feature_layer, gdf, staging_format=fmt, use_async=self.use_async)
             return
 
         if m == "auto":
@@ -457,9 +482,9 @@ class FeatureLayerManager:
             feature_layer.manager.truncate()
             
         if len(gdf) >= BATCH_THRESHOLD:
-            self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=StagingFormat.GPKG)
+            self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=fmt)
         else:
-            self._append_via_item_hardened(feature_layer, gdf, staging_format=StagingFormat.GPKG, use_async=self.use_async)
+            self._append_via_item_hardened(feature_layer, gdf, staging_format=fmt, use_async=self.use_async)
 
     # ----------------------------
     # Multi-layer entrypoint
@@ -480,6 +505,8 @@ class FeatureLayerManager:
         - flc: optional FeatureLayerCollection for existing service (skip discovery if provided)
         Returns the item id of the Feature Service.
         """
+
+        normalized_staging_format = self._normalize_staging_format(staging_format)
 
         # Normalize input to dict
         if isinstance(layer_data, gpd.GeoDataFrame):
@@ -572,7 +599,7 @@ class FeatureLayerManager:
                     service_name=service_name,
                     layer_data_copy=layer_data_copy,
                     metadata=metadata or {},
-                    staging_format=staging_format,
+                    staging_format=normalized_staging_format,
                 )
                 created_new_service = True
             else:
@@ -607,7 +634,7 @@ class FeatureLayerManager:
             layer_mode = mode
             if created_new_service:
                 layer_mode = "initial"
-            self.publish_or_update(target_layer, gdf, mode=layer_mode)
+            self.publish_or_update(target_layer, gdf, mode=layer_mode, staging_format=normalized_staging_format)
 
         return existing_id
     

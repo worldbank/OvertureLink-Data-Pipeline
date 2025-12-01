@@ -177,17 +177,73 @@ class CacheMetadata:
         }
     
     @classmethod
-    def from_dict(cls, data: dict) -> 'CacheMetadata':
-        """Create from dictionary."""
+    def from_dict(cls, data: dict, metadata_path: Optional[Path] = None) -> 'CacheMetadata':
+        """Create from dictionary with graceful fallbacks for legacy metadata."""
+
+        country = data.get('country') or data.get('iso2') or "UNKNOWN"
+        release = data.get('release') or data.get('version') or "unknown"
+        theme = data.get('theme') or data.get('sector') or "unknown"
+        type_name = data.get('type') or data.get('type_name') or "unknown"
+
+        cached_date = (
+            data.get('cached_date')
+            or data.get('cached_at')
+            or data.get('created_at')
+            or data.get('generated')
+        )
+        if not cached_date:
+            cached_date = datetime.now().isoformat()
+
+        feature_count = (
+            data.get('feature_count')
+            or data.get('features')
+            or data.get('featureTotal')
+        )
+        if feature_count is None:
+            feature_count = 0
+
+        size_mb = data.get('size_mb')
+        if size_mb is None:
+            size_bytes = data.get('size_bytes')
+            if size_bytes is not None:
+                size_mb = float(size_bytes) / (1024 * 1024)
+        if size_mb is None and metadata_path is not None:
+            parquet_path = metadata_path.with_suffix('.parquet')
+            if parquet_path.exists():
+                size_mb = parquet_path.stat().st_size / (1024 * 1024)
+        if size_mb is None:
+            size_mb = 0.0
+
+        bbox_data = data.get('bbox') or data.get('bounds') or data.get('bounding_box')
+        if not bbox_data:
+            bbox_tuple = (0.0, 0.0, 0.0, 0.0)
+        elif isinstance(bbox_data, dict):
+            bbox_tuple = (
+                float(bbox_data.get('minx', 0.0)),
+                float(bbox_data.get('miny', 0.0)),
+                float(bbox_data.get('maxx', 0.0)),
+                float(bbox_data.get('maxy', 0.0)),
+            )
+        else:
+            bbox_list = list(bbox_data)
+            while len(bbox_list) < 4:
+                bbox_list.append(0.0)
+            bbox_tuple = (
+                float(bbox_list[0]),
+                float(bbox_list[1]),
+                float(bbox_list[2]),
+                float(bbox_list[3]),
+            )
+
         return cls(
-            country=data['country'],
-            release=data['release'],
-            theme=data['theme'],
-            type_name=data['type'],
-            cached_date=data['cached_date'],
-            feature_count=data['feature_count'],
-            size_mb=data['size_mb'],
-            bbox=tuple(data['bbox'])
+            country=country,
+            release=release,
+            theme=theme,
+            type_name=type_name,
+            cached_date=cached_date,
+            feature_count=int(feature_count),
+            size_mb=float(size_mb),
+            bbox=bbox_tuple,
         )
 
 
@@ -1524,7 +1580,7 @@ class OvertureSource:
             for metadata_file in country_dir.glob("*.json"):
                 try:
                     metadata_data = json.loads(metadata_file.read_text())
-                    metadata = CacheMetadata.from_dict(metadata_data)
+                    metadata = CacheMetadata.from_dict(metadata_data, metadata_file)
                     cached_entries.append(metadata)
                 except Exception as e:
                     logging.warning(f"Failed to read metadata {metadata_file}: {e}")

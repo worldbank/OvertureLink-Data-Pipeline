@@ -7,7 +7,9 @@ Handles export to GeoJSON, GeoPackage, and File Geodatabase formats.
 
 import json
 import logging
+import shutil
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -152,7 +154,7 @@ class Exporter:
         Args:
             gdf: GeoDataFrame to stage
             layer_name: Layer name for GPKG staging
-            staging_format: Format for staging ("geojson" or "gpkg")
+            staging_format: Format for staging ("geojson", "gpkg", or "fgdb")
             
         Returns:
             NamedTemporaryFile object with staging data
@@ -167,6 +169,8 @@ class Exporter:
             return self._gdf_to_geojson_tempfile(gdf, temp_dir)
         elif staging_format.lower() == "gpkg":
             return self._gdf_to_gpkg_tempfile(gdf, layer_name, temp_dir)
+        elif staging_format.lower() == "fgdb":
+            return self._gdf_to_fgdb_tempfile(gdf, layer_name, temp_dir)
         else:
             raise ValueError(f"Unsupported staging format: {staging_format}")
     
@@ -202,6 +206,32 @@ class Exporter:
                 self.name = name
         
         return TempFile(tmp_name)
+
+    def _gdf_to_fgdb_tempfile(self, gdf: gpd.GeoDataFrame, layer_name: str, temp_dir: Path):
+        """Write GeoDataFrame to a temporary zipped File Geodatabase for staging."""
+        gdb_name = f"{layer_name}_{uuid.uuid4().hex[:8]}.gdb"
+        gdb_path = temp_dir / gdb_name
+
+        # Export to FGDB directory
+        self._export_to_fgdb(
+            data=gdf,
+            output_path=gdb_path,
+            target_name=layer_name,
+            raw_export=False,
+            include_metadata=False,
+        )
+
+        # Zip the FGDB directory for upload
+        archive_base = temp_dir / gdb_name[:-4]
+        archive_path = shutil.make_archive(str(archive_base), "zip", root_dir=temp_dir, base_dir=gdb_name)
+
+        # Clean up raw FGDB directory to avoid clutter
+        shutil.rmtree(gdb_path, ignore_errors=True)
+
+        class TempFile:
+            def __init__(self, name): self.name = name
+
+        return TempFile(archive_path)
 
     def _gdf_to_gpkg_tempfile(self, gdf: gpd.GeoDataFrame, layer_name: str, temp_dir: Path):
         """Write GeoDataFrame to a temporary GeoPackage with a single layer.
@@ -282,8 +312,9 @@ class Exporter:
                     "count": len(features_data.get("features", []))
                 }
         
-        # Use GeoPandas to_file() for clean, standard GeoJSON formatting (same as raw export)
-        data.to_file(output_path, driver='GeoJSON')
+        # Write the complete GeoJSON data (including metadata) to file
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(geojson_data, f, indent=2, ensure_ascii=False)
         
         # Validate written file
         if not self._validate_geojson_file(str(output_path)):

@@ -7,9 +7,11 @@ Choose your Overture query, specify the country, then you're done!
 This ETL pipeline allows you to query and extract Overture Maps data (such as roads, buildings) to upload to ArcGIS Online, download as different file types for any GIS software, or save as a local dump for continual use. This pipeline supports 176 countries worldwide with its country/ISO database, allows you to use pre-built queries or your own custom queries, and is designed to align with Overture's monthly releases. This pipeline was originally built to support the World Bank's distributed data across ArcGIS Hubs, but should work for other work flows. 
 
 ## Commands
-- `arcgis-upload` - Publish processed data to ArcGIS Online feature layers
-- `export` - Export data to GeoJSON, GeoPackage, or File Geodatabase formats
-- `overture-dump` - High-performance local caching system for multi-country operations
+There are three main commands when using this pipeline. 
+- `overture-dump` - This command caches Overture dumps with a local caching system, which is useful for multiple country uploads.
+- `arcgis-upload` - Publish processed data to ArcGIS Online feature layers as a one off. 
+- `export` - Export data to GeoJSON, GeoPackage, or File Geodatabase formats without uploading to ArcGIS Online. This is useful if you just need to grab specific queried data from Overture.
+
 
 ## Key Features
 - Automatic AGOL discovery: The pipeline will either create a new feature layer or use truncate and append based on whether or not a feature layer already exists. 
@@ -54,42 +56,7 @@ On macOS/Linux:
 - No need to create country-specific config files, you can use the global config with a country argument
 
 ### 4. Run commands
-The Python CLI has three main commands: uploading to AGOL, downloading as geojson, or download dump for local use as needed.
-
-#### Upload to ArcGIS Online:
-- Example with Afghanistan country parameter:
-   `o2agol arcgis-upload roads --country afg`
-   
-- Or using module directly:
-   `python -m o2agol.cli arcgis-upload roads --country afg`
-
-#### Export to Multiple Formats:
-- Export Afghanistan roads to GeoJSON (auto-filename: afg_roads.geojson):
-   `o2agol export roads --country lux`
-   
-- Export to GeoPackage format:
-   `o2agol export buildings --country lux --format gpkg`
-   
-- Export raw Overture data (no AGOL transformations):
-   `o2agol export places --country lux --format gpkg --raw`
-   
-- Export to custom filename with format auto-detection:
-   `o2agol export roads lux_roads.gpkg --country lux`
-
-### Review options
-- If needed you can always review options with the --help argument.
-- `o2agol --help`
-- `o2agol arcgis-upload --help`
-- `o2agol export --help`
-- `o2agol overture-dump --help`
-
-### List Queries
-- You can list the available queries with this command:
-   `o2agol list-queries`
-   or
-   `python -m o2agol.cli list-queries`
-
-And add you own query in the global config (`src\o2agol\data\queries.yml`)
+The Python CLI has three main commands: uploading to AGOL `arcgis-upload` , downloading as geojson `export`, or download dump for local use as needed `overture-dump`. 
 
 ## Outputs
 
@@ -147,6 +114,42 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - `--mode append` - Add data to existing layer without clearing (requires item_id in config)
 
 ## Examples:
+
+#### Upload to ArcGIS Online:
+- Example with Afghanistan country parameter:
+   `o2agol arcgis-upload roads --country afg`
+   
+- Or using module directly:
+   `python -m o2agol.cli arcgis-upload roads --country afg`
+
+#### Export to Multiple Formats:
+- Export Afghanistan roads to GeoJSON (auto-filename: afg_roads.geojson):
+   `o2agol export roads --country lux`
+   
+- Export to GeoPackage format:
+   `o2agol export buildings --country lux --format gpkg`
+   
+- Export raw Overture data (no AGOL transformations):
+   `o2agol export places --country lux --format gpkg --raw`
+   
+- Export to custom filename with format auto-detection:
+   `o2agol export roads lux_roads.gpkg --country lux`
+
+### Review options
+- If needed you can always review options with the --help argument.
+- `o2agol --help`
+- `o2agol arcgis-upload --help`
+- `o2agol export --help`
+- `o2agol overture-dump --help`
+
+### List Queries
+- You can list the available queries with this command:
+   `o2agol list-queries`
+   or
+   `python -m o2agol.cli list-queries`
+
+And add you own query in the global config (`src\o2agol\data\queries.yml`)
+
 
 ### ArcGIS Online Upload:
 - `o2agol arcgis-upload roads --country afg` - Afghanistan road networks
