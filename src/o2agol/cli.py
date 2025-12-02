@@ -9,6 +9,8 @@ import typer
 import yaml
 from dotenv import load_dotenv
 
+import geopandas as gpd
+
 # Load environment variables BEFORE importing local modules that use them
 load_dotenv()
 
@@ -984,6 +986,9 @@ def arcgis_upload(
             from .config_loader import format_metadata_from_config
             metadata = format_metadata_from_config(config_dict, query_config, country_config)
             
+            #hide any polygons
+            transformed_data = polygons_to_centroids(transformed_data)
+
             if isinstance(transformed_data, dict):
                 # Multi-layer service (education, health, markets)
                 item_id = publisher.publish_multi_layer_service(
@@ -1150,6 +1155,8 @@ def export_data_command(
             logging.info(f"Fetching {query_config.theme} data for {country_config.name}")
             data_result = source.read(query_config, country_config, clip_strategy, raw=raw)
             
+
+
             # Check for empty results
             if isinstance(data_result, dict):
                 total_features = sum(len(gdf) for gdf in data_result.values())
@@ -1178,10 +1185,20 @@ def export_data_command(
                 normalized_data = transformer.normalize(data_result)
                 transformed_data = transformer.add_metadata(normalized_data, country_config)
             
+############################################
+############################################
+
+
+            # create single point from building polygons
+            transformed_data = polygons_to_centroids(transformed_data)
+
+############################################
+############################################
+
             # Export using traditional Exporter
             logging.info(f"Exporting to {format.upper()} format")
             exporter = Exporter(out_path=output_path_obj, fmt=ExportFormat(format))
-            
+
             final_path = exporter.write(
                 data=transformed_data,
                 base_name=f"{country_config.iso3.lower()}_{query_config.name}",
@@ -1269,7 +1286,6 @@ def list_queries(
     except Exception as e:
         typer.echo(f"ERROR: {e}", err=True)
         raise typer.Exit(1)
-
 
 
 
@@ -1956,3 +1972,70 @@ def version():
 
 if __name__ == "__main__":
     app()
+
+# This function will check for layers with polygon geometries and convert them to centroids
+def polygons_to_centroids(transformed_data: dict[str, gpd.GeoDataFrame]) -> dict[str, gpd.GeoDataFrame]:
+    base_logger = logging.getLogger(__name__)
+    pipeline_logger = PipelineLogger(base_logger)
+    # create single point from building polygons
+    #print("\n############################################\n")
+
+    out: dict[str, gpd.GeoDataFrame] = {k: v.copy() for k, v in transformed_data.items()}
+
+    for name,d in transformed_data.items():
+        
+        # What geometry types do we have?
+        gtypes = set(d.geom_type.dropna().unique()) if not d.empty else set()
+        crs_str = d.crs.to_string() if d.crs is not None else "None"
+        pipeline_logger.info(f"[{name}] geom_types={gtypes} | crs={crs_str}")
+        #print(f"[{name}] geom_types={gtypes} | crs={crs_str}")
+
+        if not any(t in {"Polygon", "MultiPolygon"} for t in gtypes):
+            pipeline_logger.info(f"[{name}] No (Multi)Polygon geometries to centroid. Skipping.")
+            #print(f"[{name}] No (Multi)Polygon geometries to centroid. Skipping.")
+            continue
+
+        if d.crs is None:
+            pipeline_logger.info(f"[{name}] CRS is None → set it first (e.g., EPSG:4326).")
+            #print(f"[{name}] CRS is None → set it first (e.g., EPSG:4326).")
+            continue
+        
+        # Compute centroids in a projected CRS, then back to WGS84
+        if d.crs.is_geographic:
+            try:
+                proj_crs = d.estimate_utm_crs()
+                pipeline_logger.info(f"[{name}] best CRS is: {proj_crs.to_string()}")
+                #print(f"[{name}] best CRS is: {proj_crs.to_string()}")
+                centroids_wgs84 = (
+                    d.to_crs(proj_crs).geometry.centroid
+                    .set_crs(proj_crs)              # ensure CRS on series
+                    .to_crs("EPSG:4326")
+                )
+            except Exception as e:
+                pipeline_logger.info(f"[{name}] estimate_utm_crs() failed: {e} → fallback (less accurate).")
+                #print(f"[{name}] estimate_utm_crs() failed: {e} → fallback (less accurate).")
+                centroids_wgs84 = gpd.GeoSeries(d.geometry.centroid, crs=d.crs).to_crs("EPSG:4326")
+        else:
+            centroids_wgs84 = gpd.GeoSeries(d.geometry.centroid, crs=d.crs).to_crs("EPSG:4326")
+
+        
+        # Build a points layer without destroying the polygon layer
+        points_gdf = d.copy()
+        # (Optional) keep original polygon geometry as an attribute column for reference
+        # points_gdf["polygon_geom"] = d.geometry
+
+ 
+        points_gdf["centroid"] = centroids_wgs84
+        points_gdf.set_geometry("centroid", inplace=True) 
+        points_gdf.drop(columns="geometry", inplace=True)
+
+        # Insert alongside the original polygon layer
+        # print(f"{name}_centroids")
+        points_key = f"{name}_centroids"
+        if points_key in out:
+            pipeline_logger.info(f"[{name}] '{points_key}' already exists, overwriting with new centroids layer.")
+        out[points_key] = points_gdf
+
+        # Keep the original polygon layer unchanged in 'out[name]'
+
+    return out
