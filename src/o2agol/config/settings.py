@@ -258,7 +258,8 @@ class Config:
         self._load_environment_variables(env_file)
         
         # Initialize configuration sections
-        self._load_agol_config()
+        if validate_on_init:
+            self._load_agol_config()
         self._load_overture_config()
         self._load_processing_config()
         self._load_temp_config()
@@ -549,7 +550,7 @@ class Config:
             'partitioning': self.dump.partitioning
         }
     
-    def validate(self) -> None:
+    def validate(self, include_agol: bool = True) -> None:
         """
         Comprehensive configuration validation.
         
@@ -559,11 +560,12 @@ class Config:
         validation_errors = []
         
         # Test ArcGIS connection
-        try:
-            gis = self.create_gis_connection()
-            _ = gis.users.me  # Test API access
-        except Exception as e:
-            validation_errors.append(f"ArcGIS connection failed: {e}")
+        if include_agol:
+            try:
+                gis = self.create_gis_connection()
+                _ = gis.users.me  # Test API access
+            except Exception as e:
+                validation_errors.append(f"ArcGIS connection failed: {e}")
         
         # Validate processing configuration
         if self.processing.threads > 32:
