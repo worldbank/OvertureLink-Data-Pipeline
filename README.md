@@ -115,27 +115,7 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 
 ## Examples:
 
-#### Upload to ArcGIS Online:
-- Example with Afghanistan country parameter:
-   `o2agol arcgis-upload roads --country afg`
-   
-- Or using module directly:
-   `python -m o2agol.cli arcgis-upload roads --country afg`
-
-#### Export to Multiple Formats:
-- Export Afghanistan roads to GeoJSON (auto-filename: afg_roads.geojson):
-   `o2agol export roads --country lux`
-   
-- Export to GeoPackage format:
-   `o2agol export buildings --country lux --format gpkg`
-   
-- Export raw Overture data (no AGOL transformations):
-   `o2agol export places --country lux --format gpkg --raw`
-   
-- Export to custom filename with format auto-detection:
-   `o2agol export roads lux_roads.gpkg --country lux`
-
-### Review options
+### Help Command
 - If needed you can always review options with the --help argument.
 - `o2agol --help`
 - `o2agol arcgis-upload --help`
@@ -150,6 +130,22 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 
 And add you own query in the global config (`src\o2agol\data\queries.yml`)
 
+#### Upload to ArcGIS Online:
+- Example with Afghanistan country parameter:
+   `o2agol arcgis-upload roads --country afg`
+   
+- Or using module directly:
+   `python -m o2agol.cli arcgis-upload roads --country afg`
+
+#### Export to Multiple Formats:
+- Export Afghanistan roads to GeoJSON (auto-filename: afg_roads.geojson):
+   `o2agol export roads --country lux`
+   
+- Export to GeoPackage format:
+   `o2agol export buildings --country lux --format gpkg`
+   
+- Export to custom filename with format auto-detection:
+   `o2agol export roads lux_roads.gpkg --country lux`
 
 ### ArcGIS Online Upload:
 - `o2agol arcgis-upload roads --country afg` - Afghanistan road networks
