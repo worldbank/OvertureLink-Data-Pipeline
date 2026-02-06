@@ -133,15 +133,43 @@ def check_temp_size_limits(warning_gb: int = 10, limit_gb: int = 20) -> bool:
     return True
 
 
+def _remove_path_with_retries(path: Path, retries: int = 3, delay_s: float = 1.0) -> bool:
+    """Attempt to remove a file/directory with retries (handles Windows file locks)."""
+    for attempt in range(1, retries + 1):
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            return True
+        except OSError as e:
+            if attempt == retries:
+                logging.warning(f"Could not remove {path}: {e}")
+                return False
+            time.sleep(delay_s)
+    return False
+
+
 def cleanup_current_pid() -> None:
     """Clean up temp files for current process."""
     pid_dir = get_project_temp_dir() / f"pid_{os.getpid()}"
-    if pid_dir.exists():
+    if not pid_dir.exists():
+        return
+
+    # Try to remove files first so a single locked file doesn't block all cleanup
+    for item in pid_dir.rglob("*"):
+        if item.is_file():
+            _remove_path_with_retries(item, retries=3, delay_s=1.0)
+
+    # Remove any empty directories, then the pid dir itself
+    for subdir in sorted([p for p in pid_dir.rglob("*") if p.is_dir()], reverse=True):
         try:
-            shutil.rmtree(pid_dir)
-            logging.debug(f"Cleaned up PID temp directory: {pid_dir}")
-        except OSError as e:
-            logging.warning(f"Could not clean PID temp directory {pid_dir}: {e}")
+            subdir.rmdir()
+        except OSError:
+            pass
+
+    if not _remove_path_with_retries(pid_dir, retries=3, delay_s=1.0):
+        logging.warning(f"Could not clean PID temp directory {pid_dir}: file(s) still in use")
 
 
 def cleanup_orphaned_pids() -> int:

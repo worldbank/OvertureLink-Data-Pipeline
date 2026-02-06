@@ -10,6 +10,7 @@ import yaml
 from dotenv import load_dotenv
 
 import geopandas as gpd
+import pandas as pd
 
 # Load environment variables BEFORE importing local modules that use them
 load_dotenv()
@@ -1040,7 +1041,8 @@ def arcgis_upload(
             metadata = format_metadata_from_config(config_dict, query_config, country_config)
             
             #hide any polygons
-            transformed_data = polygons_to_centroids(transformed_data)
+            if isinstance(transformed_data, dict) and query_config.is_multilayer:
+                transformed_data = add_sector_layers(transformed_data)
 
             if isinstance(transformed_data, dict):
                 # Multi-layer service (education, health, markets)
@@ -1245,7 +1247,8 @@ def export_data_command(
 
 
             # create single point from building polygons
-            transformed_data = polygons_to_centroids(transformed_data)
+            if isinstance(transformed_data, dict) and query_config.is_multilayer:
+                transformed_data = add_sector_layers(transformed_data)
 
 ############################################
 ############################################
@@ -1730,6 +1733,9 @@ def overture_dump(
                 if not layer_gdf.empty:
                     normalized_gdf = transformer.normalize(layer_gdf)
                     transformed_data[layer_name] = transformer.add_metadata(normalized_gdf, country_config)
+
+            if isinstance(transformed_data, dict) and query_config.is_multilayer:
+                transformed_data = add_sector_layers(transformed_data)
             
             if not transformed_data:
                 pipeline_logger.info("No valid data after transformation")
@@ -2160,68 +2166,134 @@ if __name__ == "__main__":
     app()
 
 # This function will check for layers with polygon geometries and convert them to centroids
-def polygons_to_centroids(transformed_data: dict[str, gpd.GeoDataFrame]) -> dict[str, gpd.GeoDataFrame]:
+def polygons_to_centroids(
+    transformed_data: gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame]
+) -> gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame]:
     base_logger = logging.getLogger(__name__)
     pipeline_logger = PipelineLogger(base_logger)
     # create single point from building polygons
     #print("\n############################################\n")
 
-    out: dict[str, gpd.GeoDataFrame] = {k: v.copy() for k, v in transformed_data.items()}
+    def _centroid_layer(name: str, layer: gpd.GeoDataFrame) -> gpd.GeoDataFrame | None:
+        if not hasattr(layer, "geometry") or not hasattr(layer.geometry, "geom_type"):
+            pipeline_logger.info(f"[{name}] No GeoSeries geometry found. Skipping centroid conversion.")
+            return None
 
-    for name,d in transformed_data.items():
-        
-        # What geometry types do we have?
-        gtypes = set(d.geom_type.dropna().unique()) if not d.empty else set()
-        crs_str = d.crs.to_string() if d.crs is not None else "None"
+        gtypes = set(layer.geometry.geom_type.dropna().unique()) if not layer.empty else set()
+        crs_str = layer.crs.to_string() if layer.crs is not None else "None"
         pipeline_logger.info(f"[{name}] geom_types={gtypes} | crs={crs_str}")
-        #print(f"[{name}] geom_types={gtypes} | crs={crs_str}")
 
         if not any(t in {"Polygon", "MultiPolygon"} for t in gtypes):
             pipeline_logger.info(f"[{name}] No (Multi)Polygon geometries to centroid. Skipping.")
-            #print(f"[{name}] No (Multi)Polygon geometries to centroid. Skipping.")
-            continue
+            return None
 
-        if d.crs is None:
+        if layer.crs is None:
             pipeline_logger.info(f"[{name}] CRS is None → set it first (e.g., EPSG:4326).")
-            #print(f"[{name}] CRS is None → set it first (e.g., EPSG:4326).")
-            continue
-        
+            return None
+
         # Compute centroids in a projected CRS, then back to WGS84
-        if d.crs.is_geographic:
+        if layer.crs.is_geographic:
             try:
-                proj_crs = d.estimate_utm_crs()
+                proj_crs = layer.estimate_utm_crs()
                 pipeline_logger.info(f"[{name}] best CRS is: {proj_crs.to_string()}")
-                #print(f"[{name}] best CRS is: {proj_crs.to_string()}")
                 centroids_wgs84 = (
-                    d.to_crs(proj_crs).geometry.centroid
+                    layer.to_crs(proj_crs).geometry.centroid
                     .set_crs(proj_crs)              # ensure CRS on series
                     .to_crs("EPSG:4326")
                 )
             except Exception as e:
                 pipeline_logger.info(f"[{name}] estimate_utm_crs() failed: {e} → fallback (less accurate).")
-                #print(f"[{name}] estimate_utm_crs() failed: {e} → fallback (less accurate).")
-                centroids_wgs84 = gpd.GeoSeries(d.geometry.centroid, crs=d.crs).to_crs("EPSG:4326")
+                centroids_wgs84 = gpd.GeoSeries(layer.geometry.centroid, crs=layer.crs).to_crs("EPSG:4326")
         else:
-            centroids_wgs84 = gpd.GeoSeries(d.geometry.centroid, crs=d.crs).to_crs("EPSG:4326")
+            centroids_wgs84 = gpd.GeoSeries(layer.geometry.centroid, crs=layer.crs).to_crs("EPSG:4326")
 
-        
         # Build a points layer without destroying the polygon layer
-        points_gdf = d.copy()
-        # (Optional) keep original polygon geometry as an attribute column for reference
-        # points_gdf["polygon_geom"] = d.geometry
-
- 
+        points_gdf = layer.copy()
         points_gdf["centroid"] = centroids_wgs84
-        points_gdf.set_geometry("centroid", inplace=True) 
+        points_gdf.set_geometry("centroid", inplace=True)
         points_gdf.drop(columns="geometry", inplace=True)
+        # Normalize geometry column name for downstream publishing
+        try:
+            points_gdf = points_gdf.rename_geometry("geometry")
+        except Exception:
+            points_gdf = points_gdf.set_geometry(points_gdf.geometry.name)
+        return points_gdf
 
-        # Insert alongside the original polygon layer
-        # print(f"{name}_centroids")
+    if isinstance(transformed_data, gpd.GeoDataFrame):
+        centroids = _centroid_layer("features", transformed_data)
+        return centroids if centroids is not None else transformed_data
+
+    out: dict[str, gpd.GeoDataFrame] = {k: v.copy() for k, v in transformed_data.items()}
+
+    for name, layer in transformed_data.items():
+        centroids = _centroid_layer(name, layer)
+        if centroids is None:
+            continue
+
         points_key = f"{name}_centroids"
         if points_key in out:
             pipeline_logger.info(f"[{name}] '{points_key}' already exists, overwriting with new centroids layer.")
-        out[points_key] = points_gdf
-
-        # Keep the original polygon layer unchanged in 'out[name]'
+        out[points_key] = centroids
 
     return out
+
+
+def add_sector_layers(
+    transformed_data: gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame]
+) -> gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame]:
+    """
+    For sectoral queries (education/health/markets), ensure three layers:
+    - places (points)
+    - buildings (polygons)
+    - combined points (places + building centroids)
+    """
+    if not isinstance(transformed_data, dict):
+        return transformed_data
+
+    # Identify primary layers
+    places_key = None
+    buildings_key = None
+    for key in transformed_data.keys():
+        lowered = key.lower()
+        if places_key is None and "place" in lowered:
+            places_key = key
+        if buildings_key is None and "building" in lowered:
+            buildings_key = key
+
+    if not places_key or not buildings_key:
+        return transformed_data
+
+    # Ensure centroid layer exists
+    updated = polygons_to_centroids(transformed_data)
+    if not isinstance(updated, dict):
+        return transformed_data
+
+    centroids_key = f"{buildings_key}_centroids"
+    if centroids_key not in updated:
+        return updated
+
+    places_gdf = updated[places_key]
+    centroids_gdf = updated[centroids_key]
+
+    # Normalize geometry column name for both
+    for gdf in (places_gdf, centroids_gdf):
+        if hasattr(gdf, "geometry"):
+            try:
+                if gdf.geometry.name != "geometry":
+                    gdf.rename_geometry("geometry", inplace=True)
+            except Exception:
+                pass
+
+    combined_key = f"{places_key}_combined"
+    if combined_key not in updated:
+        combined = gpd.GeoDataFrame(
+            pd.concat([places_gdf, centroids_gdf], ignore_index=True, sort=False),
+            geometry="geometry",
+            crs=places_gdf.crs or centroids_gdf.crs
+        )
+        updated[combined_key] = combined
+
+    # Remove intermediate centroid layer (keep only combined output)
+    updated.pop(centroids_key, None)
+
+    return updated

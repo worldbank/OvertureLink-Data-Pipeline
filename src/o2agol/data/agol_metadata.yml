@@ -20,18 +20,24 @@ organization:
 # Country data will be injected dynamically based on --country parameter
 templates:
   title: "{country_name} {sector_title}"
-  snippet: "{country_name} {sector_description} with open data from Overture Maps Foundations."
+  snippet: "{country_name} {sector_description} with open data from Overture Maps Foundation."
   service_name: "{iso2}_{sector_tag}"
   description: "
     {sector_title} data for {country_name} from Overture Maps {release} release.<br><br>
+    {overture_notes}
     <b>Data Type:</b> {data_type}<br>
     <b>Geographic Coverage:</b> {country_name} ({iso3})<br>
+    
     <b>Source:</b> Overture Maps Foundation<br>
+    
     <b>Processing:</b> Overture to AGOL data pipeline. You can find the processing pipeline on GitHub <a href=\"https://github.com/worldbank/Overture-ArcGIS-Pipeline\" target=\"_blank\" rel=\"noopener noreferrer\">here</a>.<br>
+    
     <b>Release Date:</b> {release}<br>
+    
     <b>Update Frequency:</b> {update_frequency}<br><br>
     This dataset provides comprehensive {sector_description} information for {country_name}, processed through an automated data pipeline following organizational data standards.<br><br>
     
+
     <b>Usage & Attribution</b><br>
     Use consistent with Overture's license and attribution guidance. Some Overture themes incorporate third‑party sources with additional requirements—see the Overture attribution page for theme‑level details.<br>
     <b>Contact:</b> {contact_email}<br>

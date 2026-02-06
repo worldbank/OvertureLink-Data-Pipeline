@@ -146,10 +146,11 @@ class FeatureLayerManager:
             return self._sanitize_layer_name(n)
 
         # build a temporary multi-layer GeoPackage seeded with 1..SEED_SIZE rows per non-empty layer
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            gpkg_path = tmpdir / f"{self._sanitize_layer_name(service_name)}.gpkg"
+        tmpdir = Path(tempfile.mkdtemp(prefix="o2agol_seed_"))
+        gpkg_path = tmpdir / f"o2agol_seed_{uuid.uuid4().hex[:8]}.gpkg"
 
+        src_item = None
+        try:
             wrote_any = False
             for raw_name, gdf in layer_data_copy.items():
                 gdf = self._ensure_geodataframe_with_geometry(gdf)
@@ -168,7 +169,7 @@ class FeatureLayerManager:
             item_props = {
                 "type": "GeoPackage",
                 "title": item_title,
-                "tags": (metadata or {}).get("tags", "overture-pipeline,auto-created"),
+                "tags": (metadata or {}).get("tags", "overture-pipeline,auto-created,temporary"),
                 "snippet": (metadata or {}).get("snippet", ""),
                 "description": (metadata or {}).get("description", ""),
             }
@@ -193,9 +194,16 @@ class FeatureLayerManager:
             finally:
                 # Clean up the uploaded source GPKG item; the published HFL remains
                 try:
-                    src_item.delete()
+                    if src_item:
+                        src_item.delete()
                 except Exception:
                     pass
+        finally:
+            # Avoid hard failures if the temp file is still locked on Windows
+            try:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            except Exception:
+                pass
     def _normalize_tags(self, tags) -> list[str] | None:
         """Accepts list/tuple/set or comma-separated string; returns a clean list or None."""
         if tags is None:

@@ -30,7 +30,7 @@ The pipeline follows a modular Source -> Transform -> Publish/Export process:
 
 ## Requirements
 - Python 3.11+ (compatible with ArcGIS Python API)
-- ArcGIS Online credentials (optional - only required for `arcgis-upload` and `overture-dump` command)
+- ArcGIS Online credentials or OAuth client ID (required for `arcgis-upload` and `overture-dump` command)
 
 The pipeline can be used for data export without ArcGIS Online credentials. Environment configuration is managed through `.env` files for secure credential storage.
 
@@ -54,6 +54,15 @@ On macOS/Linux:
 ### 3. Define Environment
 - Use the `.env` example to define your AGOL credentials
 - No need to create country-specific config files, you can use the global config with a country argument
+
+**2FA / Browser Login (Recommended)**
+- Set `AGOL_USE_OAUTH=true` and `AGOL_CLIENT_ID=...` (no username/password required).
+- On first run, a browser window opens to complete sign-in and 2FA.
+- You can register an ArcGIS Online app to get a Client ID (Application type: "Other").
+- Optional: set `AGOL_PROFILE=your_profile` to cache the session and avoid repeated prompts in batch runs.
+
+**Username/Password (Non‑2FA or Service Accounts)**
+- Set `AGOL_USERNAME` and `AGOL_PASSWORD` as shown in `.env.example`.
 
 ### 4. Run commands
 The Python CLI has three main commands: uploading to AGOL `arcgis-upload` , downloading as geojson `export`, or download dump for local use as needed `overture-dump`. 

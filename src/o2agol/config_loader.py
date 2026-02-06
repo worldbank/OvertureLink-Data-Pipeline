@@ -176,6 +176,31 @@ def format_metadata_from_config(
         'organization': organization.get('name', 'Your Organization'),
         'current_date': datetime.now().strftime('%Y-%m-%d')
     }
+
+    # Overture + schema notes for all queries
+    variables["overture_notes"] = (
+        "<b>About Overture Maps:</b> Overture Maps Foundation publishes open, global geospatial data "
+        "organized into themes with consistent schemas for cross‑country analysis.<br>"
+        "<b>Schema:</b> This dataset uses the Overture <b>{theme}</b> theme and <b>{type}</b> layer schema.<br>"
+    ).format(theme=query_config.theme, type=query_config.type)
+
+    # Layer notes (sectoral = three layers; others = single layer)
+    if getattr(query_config, "is_multilayer", False) and query_config.name in ("education", "health", "markets"):
+        variables["layer_notes"] = (
+            "<b>Layers:</b><br>"
+            "<ul>"
+            "<li><b>places</b>: Points from Overture Places.</li>"
+            "<li><b>buildings</b>: Polygons from Overture Buildings.</li>"
+            "<li><b>places_combined</b>: Points combining Places with building centroids for analysis.</li>"
+            "</ul><br>"
+        )
+    else:
+        variables["layer_notes"] = (
+            "<b>Layers:</b><br>"
+            "<ul>"
+            "<li><b>{layer_name}</b>: Features from Overture {theme}/{type}.</li>"
+            "</ul><br>"
+        ).format(layer_name=query_config.name, theme=query_config.theme, type=query_config.type)
     
     # Format templates with variables
     formatted_metadata = {}
