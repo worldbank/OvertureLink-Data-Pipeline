@@ -135,6 +135,17 @@ def setup_logging(verbose: bool, target_name: Optional[str] = None, mode: Option
         force=True
     )
 
+    # Prevent credential leakage from third-party DEBUG logging.
+    # Some OAuth/HTTP libraries log token request payloads (including client_secret).
+    for noisy_logger in [
+        "requests_oauthlib",
+        "oauthlib",
+        "urllib3",
+        "arcgis.auth",
+        "arcgis.gis._impl._con._connection",
+    ]:
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 
 def is_template_config(config_path: str) -> bool:
     """
@@ -164,6 +175,22 @@ def infer_export_format_from_path(path: str) -> Optional[ExportFormat]:
         ".fgdb": ExportFormat.FGDB,
     }
     return mapping.get(suffix)
+
+
+def log_arcgis_identity(gis: Any) -> None:
+    """
+    Log a safe ArcGIS connection identity without assuming a user principal exists.
+    """
+    try:
+        user = gis.users.me
+        username = getattr(user, "username", None) if user else None
+        org_name = getattr(gis.properties, "name", "ArcGIS")
+        if username:
+            logging.info(f"Connected to ArcGIS as: {username} ({org_name})")
+        else:
+            logging.info(f"Connected to ArcGIS ({org_name}) using app/API authentication")
+    except Exception:
+        logging.info("Connected to ArcGIS (identity unavailable)")
 
 
 def load_pipeline_config(config_path: str, country_override: str = None) -> dict[str, Any]:
@@ -467,7 +494,7 @@ def process_target(
     cfg = config_dict
     
     # Log configuration status
-    logging.info(f"Connected to ArcGIS as: {cfg['gis'].users.me.username}")
+    log_arcgis_identity(cfg['gis'])
     logging.info(f"Environment: {cfg['environment']}")
     logging.info(f"Overture release: {cfg['overture']['release']} (from YAML)")
 
@@ -785,7 +812,7 @@ def process_target_for_export(
     cfg = config_dict
     
     # Log configuration status
-    logging.info(f"Connected to ArcGIS as: {cfg['gis'].users.me.username}")
+    log_arcgis_identity(cfg['gis'])
     logging.info(f"Environment: {cfg['environment']}")
     logging.info(f"Overture release: {cfg['overture']['release']} (from YAML)")
 
@@ -2161,10 +2188,6 @@ def version():
     except ImportError:
         typer.echo("o2agol (development version)")
 
-
-if __name__ == "__main__":
-    app()
-
 # This function will check for layers with polygon geometries and convert them to centroids
 def polygons_to_centroids(
     transformed_data: gpd.GeoDataFrame | dict[str, gpd.GeoDataFrame]
@@ -2297,3 +2320,7 @@ def add_sector_layers(
     updated.pop(centroids_key, None)
 
     return updated
+
+
+if __name__ == "__main__":
+    app()

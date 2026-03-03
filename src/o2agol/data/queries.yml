@@ -171,7 +171,7 @@ power:
     snippet: "{snippet}"
     description: "{description}"
     service_name: "{service_name}"
-    tags: "{tags_base} + ['power', 'utilities', 'infrastructure', 'energy']"
+    tags: "{tags_base} + ['energy', 'scorecard_energy', 'power infrastructure', 'utilities']"
     access_information: "{access_information}"
     license_info: "{license_info}"
     upsert_key: "id"

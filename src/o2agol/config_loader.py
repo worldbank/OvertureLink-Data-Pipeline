@@ -253,6 +253,13 @@ def format_metadata_from_config(
     # Credits/Attribution
     attribution_template = templates.get('attribution', 'Overture Maps Foundation')
     formatted_metadata['credits'] = attribution_template.format(**variables)
+
+    # Optional fixed service/item targeting from query config.
+    # This enables deterministic updates and owner inference in app-auth flows.
+    query_agol = query_config.original_config.get('agol', {}) if query_config.original_config else {}
+    item_id = query_agol.get('item_id') or query_agol.get('service_id')
+    if item_id:
+        formatted_metadata['item_id'] = str(item_id).strip()
     
     return formatted_metadata
 

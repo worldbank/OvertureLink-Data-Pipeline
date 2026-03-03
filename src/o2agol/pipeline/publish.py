@@ -177,10 +177,34 @@ class FeatureLayerManager:
             folder_id = (metadata or {}).get("folder") or (metadata or {}).get("folder_id")
 
             # Upload the GPKG as a temporary item in AGOL
+            # Prefer explicit owner in app-auth contexts to avoid logged_in_user None issues.
+            current_user = self.gis.users.me
+            owner_username = getattr(current_user, "username", None) if current_user else None
+            if not owner_username:
+                owner_username = (os.getenv("AGOL_CONTENT_OWNER") or os.getenv("AGOL_USERNAME") or "").strip() or None
+
+            add_kwargs = {"item_properties": item_props, "data": str(gpkg_path)}
             if folder_id:
-                src_item = self.gis.content.add(item_properties=item_props, data=str(gpkg_path), folder=folder_id)
-            else:
-                src_item = self.gis.content.add(item_properties=item_props, data=str(gpkg_path))
+                add_kwargs["folder"] = folder_id
+            if owner_username:
+                add_kwargs["owner"] = owner_username
+
+            try:
+                src_item = self.gis.content.add(**add_kwargs)
+            except TypeError as e:
+                if "NoneType" in str(e) and "subscriptable" in str(e):
+                    raise RuntimeError(
+                        "ArcGIS content.add failed because no logged-in user was available. "
+                        "Set AGOL_CONTENT_OWNER (or AGOL_USERNAME) and ensure the OAuth app can create content."
+                    ) from e
+                raise
+            except Exception as e:
+                if "403" in str(e):
+                    raise RuntimeError(
+                        "ArcGIS rejected item creation (403). "
+                        "Ensure the OAuth app has content creation privileges for the target owner."
+                    ) from e
+                raise
 
             if not src_item:
                 raise RuntimeError("Failed to upload staging GeoPackage for initial publish.")
@@ -528,6 +552,10 @@ class FeatureLayerManager:
         # --- DISCOVERY: resolve existing service OR create it -----------------
         item = None
         created_new_service = False
+        current_user = self.gis.users.me
+        owner_username = getattr(current_user, "username", None) if current_user else None
+        if not owner_username:
+            owner_username = (os.getenv("AGOL_CONTENT_OWNER") or os.getenv("AGOL_USERNAME") or "").strip()
 
         # If caller provided a collection, keep it and load the item
         if flc is not None:
@@ -546,6 +574,23 @@ class FeatureLayerManager:
             item = it
             flc = FeatureLayerCollection.fromitem(item)
 
+        # If user context is not available (for example client-credentials OAuth),
+        # infer owner from explicitly resolved item when possible.
+        if not owner_username and item is not None:
+            owner_username = getattr(item, "owner", None)
+
+        if not owner_username:
+            raise RuntimeError(
+                "Unable to determine ArcGIS content owner for safe discovery. "
+                "Set AGOL_CONTENT_OWNER (preferred) or AGOL_USERNAME, or provide agol.item_id in queries.yml."
+            )
+
+        if item is not None and getattr(item, "owner", None) != owner_username:
+            raise RuntimeError(
+                f"Resolved service is owned by '{getattr(item, 'owner', 'unknown')}', not '{owner_username}'. "
+                "Refusing to publish to non-owned content."
+            )
+
         # Build expected human title and URL-safe service names
         meta_title = (metadata or {}).get("title")
         expected_titles = [t.strip() for t in [service_name, meta_title] if t]
@@ -554,12 +599,16 @@ class FeatureLayerManager:
             return s.strip("_")
         expected_url_names = { _url_name(t) for t in expected_titles }
 
-        # Exact-match search by title (owner-agnostic but type-filtered)
+        # Exact-match search by title for current owner only.
         if item is None and expected_titles:
             def _search_exact(t: str):
                 # Esri search is fuzzy; we post-filter exact title equality.
-                res = self.gis.content.search(query=f'title:"{t}" AND type:"Feature Service"', max_items=100) or []
-                return [it for it in res if (it.title or "").strip() == t]
+                query = f'title:"{t}" AND type:"Feature Service" AND owner:"{owner_username}"'
+                res = self.gis.content.search(query=query, max_items=100) or []
+                return [
+                    it for it in res
+                    if (it.title or "").strip() == t and getattr(it, "owner", None) == owner_username
+                ]
             candidates = []
             for t in expected_titles:
                 candidates.extend(_search_exact(t))
@@ -580,7 +629,8 @@ class FeatureLayerManager:
         # Fallback: look for exact URL 'name' match only (no fuzzy title)
         if item is None and expected_url_names:
             try:
-                all_fs = self.gis.content.search(query='type:"Feature Service"', max_items=200) or []
+                query = f'type:"Feature Service" AND owner:"{owner_username}"'
+                all_fs = self.gis.content.search(query=query, max_items=200) or []
             except Exception:
                 all_fs = []
             def _item_url_name(it):
@@ -590,7 +640,10 @@ class FeatureLayerManager:
                 u = getattr(it, "url", "") or ""
                 m = re.search(r"/services/([^/]+)/FeatureServer", u, re.IGNORECASE)
                 return m.group(1) if m else ""
-            exact_url = [it for it in all_fs if _item_url_name(it) in expected_url_names]
+            exact_url = [
+                it for it in all_fs
+                if _item_url_name(it) in expected_url_names and getattr(it, "owner", None) == owner_username
+            ]
             if exact_url:
                 item = max(exact_url, key=lambda it: int(getattr(it, "modified", 0)) if getattr(it, "modified", None) else 0)
                 try:

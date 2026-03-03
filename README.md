@@ -56,10 +56,16 @@ On macOS/Linux:
 - No need to create country-specific config files, you can use the global config with a country argument
 
 **2FA / Browser Login (Recommended)**
-- Set `AGOL_USE_OAUTH=true` and `AGOL_CLIENT_ID=...` (no username/password required).
+- Set `AGOL_AUTH_METHOD=oauth` and `AGOL_CLIENT_ID=...` (no username/password required).
 - On first run, a browser window opens to complete sign-in and 2FA.
 - You can register an ArcGIS Online app to get a Client ID (Application type: "Other").
 - Optional: set `AGOL_PROFILE=your_profile` to cache the session and avoid repeated prompts in batch runs.
+- If you were previously using username/password and still get prompted each run, keep the same
+  `AGOL_PROFILE` and run once; the pipeline now resets stale credential-based profiles to OAuth.
+- If `AGOL_CLIENT_SECRET` is set, the pipeline uses non-interactive OAuth and ignores `AGOL_PROFILE`.
+- For non-interactive OAuth, set `AGOL_CONTENT_OWNER` to force owner-scoped discovery/publishing.
+- Non-interactive OAuth cannot create new hosted services; use `agol.item_id` to update an existing
+  service, or run initial creation once with interactive OAuth/profile auth.
 
 **Username/Password (Non‑2FA or Service Accounts)**
 - Set `AGOL_USERNAME` and `AGOL_PASSWORD` as shown in `.env.example`.

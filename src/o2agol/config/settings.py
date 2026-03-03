@@ -9,11 +9,13 @@ Usage:
 
 Environment Variables (AGOL_ standard):
     AGOL_PORTAL_URL: ArcGIS Online portal URL
-    AGOL_USERNAME: Username for ArcGIS Online (not required if using OAuth)
-    AGOL_PASSWORD: Password for ArcGIS Online (not required if using OAuth)
-    AGOL_USE_OAUTH: Set to 'true' for browser-based OAuth login (supports 2FA)
-    AGOL_CLIENT_ID: OAuth client ID (required when AGOL_USE_OAUTH is true)
-    AGOL_PROFILE: Optional profile name to persist auth locally (avoid repeated login)
+    AGOL_AUTH_METHOD: Authentication method ('credentials' or 'oauth')
+    AGOL_USERNAME: Username for ArcGIS Online (credentials auth)
+    AGOL_PASSWORD: Password for ArcGIS Online (credentials auth)
+    AGOL_CLIENT_ID: OAuth client ID (oauth auth)
+    AGOL_CLIENT_SECRET: Optional OAuth client secret (oauth auth, non-interactive)
+    AGOL_PROFILE: Optional profile name to persist auth locally (interactive auth)
+    AGOL_USE_OAUTH: Legacy flag, still supported for backward compatibility
     AGOL_TOKEN_EXPIRATION: Token expiration in minutes (default: 9999 for large datasets)
     AGOL_LARGE_DATASET_THRESHOLD: Feature count threshold for large dataset detection (default: 10000)
     DUCKDB_MEMORY_LIMIT: Memory limit for DuckDB
@@ -110,13 +112,24 @@ class PipelineLogger:
 
 @dataclass
 class AGOLCredentials:
-    """ArcGIS Online credential configuration."""
+    """ArcGIS Online credential configuration.
+
+    auth_method options:
+        credentials - Username/password login (no 2FA)
+        oauth       - Browser-based OAuth 2.0 login (supports 2FA, requires client_id)
+
+    When both client_id and client_secret are set, the pipeline uses the
+    server-to-server OAuth 2.0 client credentials flow — fully non-interactive,
+    no browser, no 2FA prompt. Suitable for automated batch runs.
+    """
     portal_url: str
+    auth_method: str = "credentials"  # credentials | oauth
     username: str = ""
     password: str = ""
-    use_oauth: bool = False  # OAuth browser login for 2FA support
-    client_id: str = ""  # Required for OAuth - register app in AGOL
-    profile: str = ""  # Optional profile name for persistent auth
+    api_key: str = ""
+    client_id: str = ""  # Required for oauth auth_method
+    client_secret: str = ""  # Optional: enables server-to-server OAuth (no 2FA)
+    profile: str = ""  # Optional: cache session across runs
     token_expiration: int = 9999  # Extended default for large datasets
     large_dataset_threshold: int = 10000  # Feature count threshold
 
@@ -125,15 +138,21 @@ class AGOLCredentials:
         if not self.portal_url.startswith(('http://', 'https://')):
             raise ValueError("Portal URL must include protocol (https://)")
 
-        # OAuth mode requires client_id; standard mode requires username/password
-        if self.use_oauth:
+        if self.auth_method not in ("credentials", "oauth"):
+            raise ValueError("AGOL_AUTH_METHOD must be 'credentials' or 'oauth'")
+
+        if self.api_key:
+            return
+
+        if self.auth_method == "oauth":
             if not self.client_id:
                 raise ValueError("AGOL_CLIENT_ID is required for OAuth authentication")
         else:
-            if not self.username:
-                raise ValueError("Username cannot be empty")
-            if len(self.password) < 8:
-                raise ValueError("Password must be at least 8 characters")
+            if not self.profile:
+                if not self.username:
+                    raise ValueError("Username cannot be empty")
+                if len(self.password) < 8:
+                    raise ValueError("Password must be at least 8 characters")
 
         if self.token_expiration < 1:
             raise ValueError("Token expiration must be positive")
@@ -263,6 +282,7 @@ class Config:
         """
         self.environment = environment or os.getenv("ENVIRONMENT", "development")
         self.project_root = self._find_project_root()
+        self.agol: Optional[AGOLCredentials] = None
         
         # Load environment variables
         self._load_environment_variables(env_file)
@@ -346,24 +366,33 @@ class Config:
         logger.debug(f"Project root: {self.project_root}")
         logger.debug(f"Loaded env files: {loaded_files}")
         logger.debug(f"Environment: {self.environment}")
+
+    def _ensure_agol_loaded(self) -> None:
+        """Lazily load AGOL configuration when auth is actually needed."""
+        if self.agol is None:
+            self._load_agol_config()
     
     def _load_agol_config(self) -> None:
         """Load and validate ArcGIS configuration."""
-        # Use AGOL_ as primary standard, ARCGIS_ as legacy fallback
         portal_url = os.getenv("AGOL_PORTAL_URL") or os.getenv("ARCGIS_PORTAL_URL")
         username = os.getenv("AGOL_USERNAME") or os.getenv("ARCGIS_USERNAME") or ""
         password = os.getenv("AGOL_PASSWORD") or os.getenv("ARCGIS_PASSWORD") or ""
-
-        # Check for OAuth browser login mode (for 2FA support)
-        use_oauth = os.getenv("AGOL_USE_OAUTH", "false").lower() in ("true", "1", "yes")
+        api_key = os.getenv("AGOL_API_KEY", "")
         client_id = os.getenv("AGOL_CLIENT_ID", "")
+        client_secret = os.getenv("AGOL_CLIENT_SECRET", "")
         profile = os.getenv("AGOL_PROFILE", "")
 
-        # Timeout configuration with sensible defaults
+        # AGOL_AUTH_METHOD: credentials | oauth
+        # Back-compat: AGOL_USE_OAUTH=true maps to oauth
+        raw_method = os.getenv("AGOL_AUTH_METHOD", "").lower()
+        if not raw_method:
+            use_oauth_legacy = os.getenv("AGOL_USE_OAUTH", "false").lower() in ("true", "1", "yes")
+            raw_method = "oauth" if use_oauth_legacy else "credentials"
+        auth_method = raw_method
+
         token_expiration = int(os.getenv("AGOL_TOKEN_EXPIRATION", "9999"))
         large_dataset_threshold = int(os.getenv("AGOL_LARGE_DATASET_THRESHOLD", "10000"))
 
-        # Validate required fields based on auth method
         if not portal_url:
             raise ConfigurationError(
                 f"Missing required AGOL_PORTAL_URL.\n"
@@ -372,34 +401,15 @@ class Config:
                 f"Current .env file: {self.project_root / '.env'}"
             )
 
-        # OAuth mode only needs portal URL; standard mode requires username/password
-        if not use_oauth:
-            if not all([username, password]):
-                missing = []
-                if not username:
-                    missing.append("AGOL_USERNAME")
-                if not password:
-                    missing.append("AGOL_PASSWORD")
-
-                raise ConfigurationError(
-                    f"Missing required ArcGIS Online credentials: {', '.join(missing)}.\n"
-                    f"Please set these variables in your .env file:\n"
-                    f"  AGOL_PORTAL_URL=https://geowb.maps.arcgis.com\n"
-                    f"  AGOL_USERNAME=your_username\n"
-                    f"  AGOL_PASSWORD=your_password\n\n"
-                    f"Or enable OAuth browser login for 2FA support:\n"
-                    f"  AGOL_USE_OAUTH=true\n"
-                    f"  AGOL_CLIENT_ID=your_client_id\n\n"
-                    f"Current .env file: {self.project_root / '.env'}"
-                )
-
         try:
             self.agol = AGOLCredentials(
                 portal_url=portal_url,
+                auth_method=auth_method,
                 username=username,
                 password=password,
-                use_oauth=use_oauth,
+                api_key=api_key,
                 client_id=client_id,
+                client_secret=client_secret,
                 profile=profile,
                 token_expiration=token_expiration,
                 large_dataset_threshold=large_dataset_threshold
@@ -479,9 +489,11 @@ class Config:
         Create authenticated ArcGIS Online connection with extended timeout support.
         Uses singleton pattern to avoid duplicate connections and logging.
 
-        Supports two authentication methods:
-        - OAuth browser login (for 2FA): Set AGOL_USE_OAUTH=true in .env
-        - Username/password: Traditional credential-based authentication
+        Supported authentication modes:
+        - OAuth browser login (2FA): AGOL_AUTH_METHOD=oauth + AGOL_CLIENT_ID (+ optional AGOL_PROFILE)
+        - OAuth client credentials (non-interactive): AGOL_AUTH_METHOD=oauth + AGOL_CLIENT_ID + AGOL_CLIENT_SECRET
+        - Username/password: AGOL_AUTH_METHOD=credentials + AGOL_USERNAME + AGOL_PASSWORD
+        - API key: AGOL_API_KEY
 
         Args:
             expiration: Token expiration time in minutes (uses configured default if None)
@@ -495,12 +507,18 @@ class Config:
         # Initialize pipeline logger if not already done
         if Config._pipeline_logger is None:
             Config._pipeline_logger = PipelineLogger(logger)
+        self._ensure_agol_loaded()
 
         # Check if we have a valid existing connection
         if Config._gis_connection is not None:
             try:
                 # Test connection validity
-                _ = Config._gis_connection.users.me
+                existing_user = Config._gis_connection.users.me
+                existing_username = getattr(existing_user, "username", None) if existing_user else None
+                # If a profile is configured, do not reuse an app-token style connection
+                # without a user principal.
+                if self.agol.profile and not existing_username:
+                    raise RuntimeError("Existing AGOL connection has no user principal; rebuilding from profile.")
                 Config._pipeline_logger.debug("Reusing existing AGOL connection", "config.settings")
                 return Config._gis_connection
             except:
@@ -510,29 +528,82 @@ class Config:
 
         # Use provided expiration or fall back to configured default
         token_expiration = expiration if expiration is not None else self.agol.token_expiration
+        use_client_credentials = bool(
+            self.agol.auth_method == "oauth" and self.agol.client_secret
+        )
 
         try:
+            # Try cached profile first to skip repeated logins.
+            # This preserves existing behavior for long-running multi-country jobs.
             if self.agol.profile:
-                # Try using saved profile first to avoid repeated sign-ins
+                # OAuth profiles should not carry username/password state, or they will
+                # keep triggering terminal 2FA prompts on each new process.
+                if self.agol.auth_method == "oauth":
+                    try:
+                        from arcgis.gis._impl._profile import ProfileManager
+
+                        profile_manager = ProfileManager()
+                        if self.agol.profile in profile_manager.list():
+                            profile_data = profile_manager.get(self.agol.profile)
+                            if profile_data.get("username"):
+                                Config._pipeline_logger.info(
+                                    f"Profile '{self.agol.profile}' was created with credentials. "
+                                    "Resetting it for OAuth token caching.",
+                                    "config.settings"
+                                )
+                                profile_manager.delete(self.agol.profile)
+                    except Exception as profile_cleanup_error:
+                        Config._pipeline_logger.debug(
+                            f"Unable to inspect/reset profile '{self.agol.profile}': {profile_cleanup_error}",
+                            "config.settings"
+                        )
+
                 try:
                     gis = GIS(profile=self.agol.profile)
                     Config._gis_connection = gis
                     user_info = gis.users.me
+                    username = getattr(user_info, "username", None) if user_info else None
+                    org_name = getattr(gis.properties, "name", "ArcGIS")
                     if not Config._connection_logged:
-                        Config._pipeline_logger.info(
-                            f"Connected to AGOL as {user_info.username} ({gis.properties.name}) via profile",
-                            "config.settings"
-                        )
+                        if username:
+                            Config._pipeline_logger.info(
+                                f"Connected to AGOL as {username} ({org_name}) via profile",
+                                "config.settings"
+                            )
+                        else:
+                            Config._pipeline_logger.info(
+                                f"Connected to AGOL ({org_name}) via profile",
+                                "config.settings"
+                            )
                         Config._connection_logged = True
                     return gis
-                except Exception:
+                except Exception as profile_error:
                     Config._pipeline_logger.info(
-                        "Saved profile not found or invalid. Falling back to interactive login.",
+                        "Saved profile not found or invalid. Falling back to configured auth method.",
+                        "config.settings"
+                    )
+                    Config._pipeline_logger.debug(
+                        f"Profile authentication failed: {profile_error}",
                         "config.settings"
                     )
 
-            if self.agol.use_oauth:
-                # OAuth browser login - opens browser for 2FA authentication
+            if self.agol.api_key:
+                gis = GIS(
+                    url=self.agol.portal_url,
+                    api_key=self.agol.api_key,
+                )
+            elif use_client_credentials:
+                # Server-to-server OAuth: client_id + client_secret, no browser, no 2FA.
+                Config._pipeline_logger.info(
+                    "Authenticating via OAuth client credentials (non-interactive)...",
+                    "config.settings"
+                )
+                gis = GIS(
+                    url=self.agol.portal_url,
+                    client_id=self.agol.client_id,
+                    client_secret=self.agol.client_secret,
+                )
+            elif self.agol.auth_method == "oauth":
                 Config._pipeline_logger.info(
                     "Opening browser for ArcGIS authentication...",
                     "config.settings"
@@ -540,39 +611,49 @@ class Config:
                 gis = GIS(
                     url=self.agol.portal_url,
                     client_id=self.agol.client_id,
-                    profile=self.agol.profile or None
+                    profile=self.agol.profile or None,
                 )
             else:
-                # Traditional username/password authentication
                 gis = GIS(
                     url=self.agol.portal_url,
                     username=self.agol.username,
                     password=self.agol.password,
                     expiration=token_expiration,
-                    profile=self.agol.profile or None
+                    profile=self.agol.profile or None,
                 )
 
             # Store connection and verify
             Config._gis_connection = gis
             user_info = gis.users.me
+            username = getattr(user_info, "username", None) if user_info else None
+            org_name = getattr(gis.properties, "name", "ArcGIS")
 
-            # Log connection details only once
             if not Config._connection_logged:
-                auth_method = "OAuth" if self.agol.use_oauth else "credentials"
-                Config._pipeline_logger.info(
-                    f"Connected to AGOL as {user_info.username} ({gis.properties.name}) via {auth_method}",
-                    "config.settings"
-                )
+                if username:
+                    Config._pipeline_logger.info(
+                        f"Connected to AGOL as {username} ({org_name}) via {self.agol.auth_method}",
+                        "config.settings"
+                    )
+                else:
+                    Config._pipeline_logger.info(
+                        f"Connected to AGOL ({org_name}) via {self.agol.auth_method}",
+                        "config.settings"
+                    )
                 Config._connection_logged = True
 
             return gis
 
         except Exception as e:
-            auth_hint = (
-                "Please complete browser authentication."
-                if self.agol.use_oauth
-                else "Please verify your credentials and portal URL."
-            )
+            if self.agol.api_key:
+                auth_hint = "Please verify AGOL_API_KEY and portal URL."
+            elif use_client_credentials:
+                auth_hint = (
+                    "Please verify AGOL_CLIENT_ID, AGOL_CLIENT_SECRET, app privileges, and portal URL."
+                )
+            elif self.agol.auth_method == "oauth":
+                auth_hint = "Please complete browser authentication and verify AGOL_CLIENT_ID/AGOL_PROFILE."
+            else:
+                auth_hint = "Please verify your credentials and portal URL."
             raise ConfigurationError(
                 f"Failed to connect to ArcGIS Online: {e}. {auth_hint}"
             ) from e
@@ -634,9 +715,16 @@ class Config:
             ConfigurationError: If any configuration is invalid
         """
         validation_errors = []
+        if include_agol:
+            self._ensure_agol_loaded()
 
-        # Test ArcGIS connection (skip for OAuth - validation happens at runtime in browser)
-        if include_agol and not self.agol.use_oauth:
+        # Test ArcGIS connection.
+        # Skip browser-based OAuth (no client_secret) — validation happens at runtime.
+        # Server-to-server OAuth (client_id + client_secret) and credentials can be validated now.
+        oauth_needs_browser = False
+        if include_agol:
+            oauth_needs_browser = self.agol.auth_method == "oauth" and not self.agol.client_secret
+        if include_agol and not oauth_needs_browser:
             try:
                 gis = self.create_gis_connection()
                 _ = gis.users.me  # Test API access
@@ -662,11 +750,13 @@ class Config:
         Returns:
             Dictionary with security-relevant configuration info (no secrets)
         """
+        agol_portal = self.agol.portal_url if self.agol else ""
+        agol_username = self.agol.username if self.agol else ""
         return {
             'environment': self.environment,
             'loaded_env_files': self._loaded_env_files,
-            'agol_portal': self.agol.portal_url,
-            'agol_username': self.agol.username,
+            'agol_portal': agol_portal,
+            'agol_username': agol_username,
             'overture_base_url': self.overture.base_url,
             'overture_release': self.overture.release,
             'duckdb_memory': self.processing.memory_limit,
@@ -678,9 +768,10 @@ class Config:
     
     def __repr__(self) -> str:
         """Safe string representation without credentials."""
+        portal = self.agol.portal_url if self.agol else "<agol-not-loaded>"
         return (
             f"Config(environment={self.environment}, "
-            f"portal={self.agol.portal_url}, "
+            f"portal={portal}, "
             f"overture_release={self.overture.release})"
         )
 
