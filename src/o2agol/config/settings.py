@@ -166,8 +166,7 @@ class OvertureConfig:
     """Overture Maps data source configuration."""
     base_url: str
     release: str
-    s3_region: str
-    
+
     def __post_init__(self):
         """Validate Overture Maps configuration."""
         if not self.base_url.startswith(('http://', 'https://', 's3://')):
@@ -320,43 +319,17 @@ class Config:
         return Path.cwd()
     
     def _load_environment_variables(self, env_file: Path | None) -> None:
-        """Load environment variables from appropriate source."""
-        loaded_files = []
-        
-        if env_file:
-            # Explicit environment file
-            if env_file.exists():
-                load_dotenv(env_file)
-                loaded_files.append(str(env_file))
-                logger.info(f"Loaded configuration from {env_file}")
-            else:
-                raise ConfigurationError(f"Specified env file not found: {env_file}")
-        
+        """Load environment variables from .env file."""
+        target = env_file or (self.project_root / ".env")
+
+        if env_file and not env_file.exists():
+            raise ConfigurationError(f"Specified env file not found: {env_file}")
+
+        if target.exists():
+            load_dotenv(target, override=True)
+            logger.info(f"Loaded configuration from {target}")
         else:
-            # Try environment-specific file first
-            env_specific_file = self.project_root / f".env.{self.environment}"
-            logger.info(f"Looking for environment config at: {env_specific_file}")
-            if env_specific_file.exists():
-                logger.info(f"Loading environment config from: {env_specific_file}")
-                load_dotenv(env_specific_file, override=True)
-                loaded_files.append(str(env_specific_file))
-                logger.info(f"Loaded environment-specific config: {env_specific_file}")
-            else:
-                logger.info(f"Environment-specific file not found: {env_specific_file}")
-            
-            # Then try generic .env file
-            generic_env_file = self.project_root / ".env"
-            logger.info(f"Looking for generic config at: {generic_env_file}")
-            if generic_env_file.exists():
-                logger.info(f"Loading generic config from: {generic_env_file}")
-                load_dotenv(generic_env_file, override=True)
-                loaded_files.append(str(generic_env_file))
-                logger.info(f"Loaded generic config: {generic_env_file}")
-            else:
-                logger.warning(f"No .env file found at {generic_env_file}")
-        
-        if not loaded_files:
-            logger.warning("No .env files found, using system environment variables only")
+            logger.warning(f"No .env file found at {target}, using system environment variables only")
         
         # Store for debugging
         self._loaded_env_files = loaded_files
@@ -422,13 +395,11 @@ class Config:
         base_url = os.getenv("OVERTURE_BASE_URL", "s3://overturemaps-us-west-2/release")
         release = os.getenv("OVERTURE_RELEASE")
         logger.info(f"Config loading OVERTURE_RELEASE from env: {release}")
-        s3_region = os.getenv("OVERTURE_S3_REGION", "us-west-2")
-        
+
         try:
             self.overture = OvertureConfig(
                 base_url=base_url,
                 release=release,
-                s3_region=s3_region
             )
         except ValueError as e:
             raise ConfigurationError(f"Invalid Overture configuration: {e}")

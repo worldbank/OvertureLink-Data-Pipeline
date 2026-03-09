@@ -5,7 +5,6 @@
 # Data Source Configuration
 overture:
   base_url: "s3://overturemaps-us-west-2/release"
-  s3_region: "us-west-2"
   # Release version comes from OVERTURE_RELEASE environment variable
 
 # Organization Metadata Templates

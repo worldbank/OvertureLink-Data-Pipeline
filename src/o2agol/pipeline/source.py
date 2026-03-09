@@ -307,6 +307,16 @@ class OvertureSource:
                 logging.warning(f"Failed to initialize dump directories: {e}")
                 self._use_local_dumps = False
         
+    @staticmethod
+    def _region_from_url(base_url: str) -> str:
+        """Extract AWS region from an S3 base URL (e.g. s3://overturemaps-us-west-2/release -> us-west-2)."""
+        host = base_url.replace('s3://', '').split('/')[0]  # e.g. overturemaps-us-west-2
+        parts = host.split('-')
+        # Region is the last three dash-separated tokens for standard AWS regions (e.g. us-west-2)
+        if len(parts) >= 3:
+            return '-'.join(parts[-3:]) if parts[-2] in ('east', 'west', 'central', 'north', 'south', 'northeast', 'southeast') else '-'.join(parts[-2:])
+        return 'us-west-2'
+
     def _setup_duckdb_optimized(self) -> duckdb.DuckDBPyConnection:
         """Configure DuckDB with optimized settings for spatial queries."""
         con = duckdb.connect()
@@ -337,9 +347,9 @@ class OvertureSource:
         con.execute(f"SET temp_directory='{temp_dir_str}';")
         con.execute("SET max_temp_directory_size='50GB';")
         
-        # S3 and remote file optimizations
-        s3_region = self.cfg.get('overture', {}).get('s3_region', 'us-west-2')
-        con.execute(f"SET s3_region='{s3_region}';")
+        # S3 and remote file optimizations — region derived from OVERTURE_BASE_URL
+        base_url = self.cfg.get('overture', {}).get('base_url', 's3://overturemaps-us-west-2/release')
+        con.execute(f"SET s3_region='{self._region_from_url(base_url)}';")
         
         # HTTP connection optimizations
         con.execute("SET http_timeout=1800000;")  # 30 minutes for large transfers
@@ -1150,7 +1160,9 @@ class OvertureSource:
                 logging.info(f"[{i}/{total_types}] Starting download: {theme}/{type_name}")
                 logging.info("DuckDB is actively downloading from S3 - please wait...")
                 
-                source_pattern = f"s3://overturemaps-us-west-2/release/{release}/theme={theme}/type={type_name}/*.parquet"
+                base_url = self.cfg.get('overture', {}).get('base_url', 's3://overturemaps-us-west-2/release')
+                base_url = base_url.rstrip('/').split('/release')[0] + '/release'
+                source_pattern = f"{base_url}/{release}/theme={theme}/type={type_name}/*.parquet"
                 target_dir = dump_path / f"type={type_name}"
                 target_dir.mkdir(exist_ok=True)
                 target_file = target_dir / "data.parquet"
@@ -1281,9 +1293,9 @@ class OvertureSource:
         con.execute(f"SET memory_limit='{memory_limit}';")
         con.execute("SET threads=4;")  # Conservative for downloads
         
-        # S3 and HTTP optimizations
-        s3_region = self.cfg.get('overture', {}).get('s3_region', 'us-west-2')
-        con.execute(f"SET s3_region='{s3_region}';")
+        # S3 and HTTP optimizations — region derived from OVERTURE_BASE_URL
+        base_url = self.cfg.get('overture', {}).get('base_url', 's3://overturemaps-us-west-2/release')
+        con.execute(f"SET s3_region='{self._region_from_url(base_url)}';")
         con.execute("SET http_timeout=1800000;")  # 30 minutes for large downloads
         con.execute("SET http_retries=3;")
         con.execute("SET http_keep_alive=true;")
@@ -1309,9 +1321,11 @@ class OvertureSource:
             logging.warning(f"Unknown theme types for {theme}, attempting dynamic discovery")
             try:
                 # Query S3 for available types
+                base_url = self.cfg.get('overture', {}).get('base_url', 's3://overturemaps-us-west-2/release')
+                base_url = base_url.rstrip('/').split('/release')[0] + '/release'
                 query = f"""
                 SELECT DISTINCT regexp_extract(filename, 'type=([^/]+)', 1) as type_name
-                FROM glob('s3://overturemaps-us-west-2/release/{release}/theme={theme}/type=*/*.parquet')
+                FROM glob('{base_url}/{release}/theme={theme}/type=*/*.parquet')
                 WHERE type_name IS NOT NULL
                 ORDER BY type_name
                 """

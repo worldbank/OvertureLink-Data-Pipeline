@@ -270,7 +270,6 @@ def load_config(
         },
         'overture': {
             'base_url': overture_config.base_url,
-            's3_region': overture_config.s3_region,
             'release': overture_config.release
         }
     }

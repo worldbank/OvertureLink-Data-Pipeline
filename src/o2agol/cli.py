@@ -227,20 +227,18 @@ def load_pipeline_config(config_path: str, country_override: str = None) -> dict
         # Get overture config from template parser
         overture_config = template_parser.get_overture_config()
         overture_release = overture_config.get('release')
-        s3_region = overture_config.get('s3_region', 'us-west-2')
-        
+
         # Build base URL from template config
-        base_url = overture_config.get('base_url', f's3://overturemaps-{s3_region}/release')
+        base_url = overture_config.get('base_url', 's3://overturemaps-us-west-2/release')
         if not base_url.endswith(overture_release):
             base_url = f"{base_url}/{overture_release}"
-        
+
         pipeline_config = {
             'secure': secure_config,
             'gis': gis_connection,
             'duckdb_settings': secure_config.get_duckdb_settings(),
             'overture': {
                 'release': overture_release,
-                's3_region': s3_region,
                 'base_url': base_url
             },
             'yaml': template_parser.raw_config,  # For backward compatibility
@@ -268,17 +266,14 @@ def load_pipeline_config(config_path: str, country_override: str = None) -> dict
             raise ValueError("overture_release is required in YAML configuration")
         
         overture_s3 = yaml_config.get('overture_s3', {})
-        s3_region = overture_s3.get('region', 'us-west-2')
-        s3_bucket = overture_s3.get('bucket', f'overturemaps-{s3_region}')
-        
+        s3_bucket = overture_s3.get('bucket', 'overturemaps-us-west-2')
+
         pipeline_config = {
             'secure': secure_config,
             'gis': gis_connection,
             'duckdb_settings': secure_config.get_duckdb_settings(),
             'overture': {
-                'release': overture_release,        # From YAML
-                's3_region': s3_region,            # From YAML  
-                'bucket': s3_bucket,               # From YAML
+                'release': overture_release,
                 'base_url': f"s3://{s3_bucket}/release/{overture_release}"
             },
             'yaml': yaml_config,
