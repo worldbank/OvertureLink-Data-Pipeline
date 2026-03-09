@@ -233,7 +233,14 @@ class FeatureLayerManager:
         if tags is None:
             return None
         if isinstance(tags, (list, tuple, set)):
-            return [str(t).strip() for t in tags if str(t).strip()]
+            normalized = []
+            for tag in tags:
+                if tag is None:
+                    continue
+                text = str(tag).strip()
+                if text:
+                    normalized.append(text)
+            return normalized
         if isinstance(tags, str):
             parts = [p.strip() for p in tags.split(",")]
             return [p for p in parts if p]
@@ -274,6 +281,156 @@ class FeatureLayerManager:
         item.update(item_properties=props)
         logging.info(f"Updated item metadata fields: {', '.join(props.keys())}")
         return True
+
+    def _normalize_visibility(self, value: Any) -> str:
+        """Normalize sharing visibility to private|org|public."""
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"private", "org", "public"}:
+                return normalized
+        return "private"
+
+    def _extract_group_id(self, group_entry: Any) -> str:
+        """Extract an AGOL group id from string/object/dict inputs."""
+        if isinstance(group_entry, str):
+            return group_entry.strip()
+        if isinstance(group_entry, dict):
+            return str(group_entry.get("id") or group_entry.get("groupid") or "").strip()
+        return str(getattr(group_entry, "id", "")).strip()
+
+    def _get_current_item_sharing(self, item) -> tuple[str, set[str]]:
+        """
+        Return current item sharing as (visibility, group_ids).
+        visibility is one of private|org|public.
+        """
+        visibility = self._normalize_visibility(getattr(item, "access", "private"))
+        group_ids: set[str] = set()
+
+        try:
+            shared_with = item.shared_with
+        except Exception as e:
+            logger.debug(f"Unable to read item.shared_with; using item.access only: {e}")
+            shared_with = {}
+
+        if isinstance(shared_with, dict):
+            try:
+                if bool(shared_with.get("everyone")):
+                    visibility = "public"
+                elif bool(shared_with.get("org")) and visibility != "public":
+                    visibility = "org"
+
+                for entry in shared_with.get("groups") or []:
+                    group_id = self._extract_group_id(entry)
+                    if group_id:
+                        group_ids.add(group_id)
+            except Exception as e:
+                logger.debug(f"Failed to parse shared_with payload: {e}")
+
+        return visibility, group_ids
+
+    def _apply_item_sharing(self, item, metadata: dict | None) -> None:
+        """Apply optional sharing settings from metadata in additive mode."""
+        if not isinstance(metadata, dict):
+            return
+
+        sharing_cfg = metadata.get("sharing")
+        if not isinstance(sharing_cfg, dict):
+            return
+
+        policy = str(sharing_cfg.get("policy", "additive")).strip().lower() or "additive"
+        if policy != "additive":
+            logger.warning("Unsupported sharing policy '%s'; continuing with additive mode.", policy)
+
+        on_missing = str(sharing_cfg.get("on_missing_group", "warn")).strip().lower() or "warn"
+        if on_missing == "fail":
+            logger.warning("on_missing_group=fail is currently non-blocking; warnings will be emitted.")
+        elif on_missing != "warn":
+            logger.warning("Unknown on_missing_group '%s'; defaulting to warn behavior.", on_missing)
+
+        target_visibility = self._normalize_visibility(sharing_cfg.get("visibility", "private"))
+        requested_groups = self._normalize_tags(sharing_cfg.get("groups")) or []
+        # De-duplicate while preserving order.
+        requested_groups = list(dict.fromkeys(requested_groups))
+
+        context = sharing_cfg.get("context", {}) if isinstance(sharing_cfg.get("context"), dict) else {}
+        country_key = context.get("country_key") or "default"
+        country_iso3 = context.get("country_iso3") or "unknown"
+        query_name = context.get("query_name") or "unknown"
+
+        logger.info(
+            "Resolved AGOL sharing: country_key=%s (iso3=%s) query=%s visibility=%s configured_groups=%d",
+            country_key,
+            country_iso3,
+            query_name,
+            target_visibility,
+            len(requested_groups),
+        )
+
+        current_visibility, current_group_ids = self._get_current_item_sharing(item)
+        visibility_rank = {"private": 0, "org": 1, "public": 2}
+        needs_visibility_upgrade = visibility_rank[target_visibility] > visibility_rank[current_visibility]
+        effective_visibility = target_visibility if needs_visibility_upgrade else current_visibility
+
+        valid_groups: list[str] = []
+        skipped_missing: list[str] = []
+        for group_id in requested_groups:
+            try:
+                group = self.gis.groups.get(group_id)
+            except Exception as e:
+                logger.warning("Unable to validate group '%s': %s", group_id, e)
+                skipped_missing.append(group_id)
+                continue
+
+            if group is None:
+                logger.warning("Configured group '%s' not found or inaccessible; skipping.", group_id)
+                skipped_missing.append(group_id)
+                continue
+
+            valid_groups.append(group_id)
+
+        already_shared = [group_id for group_id in valid_groups if group_id in current_group_ids]
+        groups_to_share = [group_id for group_id in valid_groups if group_id not in current_group_ids]
+        newly_shared_count = 0
+
+        if needs_visibility_upgrade or groups_to_share:
+            try:
+                share_result = item.share(
+                    everyone=(effective_visibility == "public"),
+                    org=(effective_visibility in ("org", "public")),
+                    groups=groups_to_share or None,
+                )
+                not_shared_with: list[str] = []
+                if isinstance(share_result, dict):
+                    raw_not_shared = share_result.get("notSharedWith") or share_result.get("notSharedwith")
+                    if isinstance(raw_not_shared, (list, tuple, set)):
+                        for entry in raw_not_shared:
+                            value = str(entry).strip()
+                            if value:
+                                not_shared_with.append(value)
+
+                if not_shared_with:
+                    logger.warning(
+                        "AGOL could not share with %d group(s): %s. "
+                        "Ensure the publishing user/app is a member and has share permissions.",
+                        len(not_shared_with),
+                        ", ".join(not_shared_with),
+                    )
+
+                _, current_group_ids = self._get_current_item_sharing(item)
+                newly_shared_count = len(
+                    [group_id for group_id in groups_to_share if group_id in current_group_ids]
+                )
+            except Exception as e:
+                logger.warning("Failed to apply AGOL sharing update; continuing publish: %s", e)
+
+        logger.info(
+            "AGOL sharing summary: requested_groups=%d valid_groups=%d newly_shared=%d already_shared=%d skipped_missing=%d",
+            len(requested_groups),
+            len(valid_groups),
+            newly_shared_count,
+            len(already_shared),
+            len(skipped_missing),
+        )
 
     # ----------------------------
     # Append via staged item (server-side)
@@ -696,6 +853,11 @@ class FeatureLayerManager:
             if created_new_service:
                 layer_mode = "initial"
             self.publish_or_update(target_layer, gdf, mode=layer_mode, staging_format=normalized_staging_format)
+
+        try:
+            self._apply_item_sharing(item, metadata or {})
+        except Exception as e:
+            logger.warning(f"Skipping item sharing update: {e}")
 
         return existing_id
     

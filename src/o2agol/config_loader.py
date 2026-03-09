@@ -11,6 +11,7 @@ Returns unified configuration objects for use in CLI commands.
 """
 
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,145 @@ from .domain.enums import ClipStrategy
 from .domain.models import Country as DomainCountry
 from .domain.models import Query as DomainQuery
 from .domain.models import RunOptions
+
+logger = logging.getLogger(__name__)
+
+_VISIBILITY_PRIVATE = "private"
+_VISIBILITY_ORG = "org"
+_VISIBILITY_PUBLIC = "public"
+_ALLOWED_VISIBILITY = {_VISIBILITY_PRIVATE, _VISIBILITY_ORG, _VISIBILITY_PUBLIC}
+
+
+def _normalize_visibility(value: Any) -> str:
+    """Normalize sharing visibility with a safe default."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _ALLOWED_VISIBILITY:
+            return normalized
+    return _VISIBILITY_PRIVATE
+
+
+def _normalize_groups(groups: Any) -> list[str]:
+    """Normalize and dedupe configured AGOL group IDs."""
+    if groups is None:
+        return []
+    if isinstance(groups, str):
+        candidates: list[Any] = [groups]
+    elif isinstance(groups, (list, tuple, set)):
+        candidates = list(groups)
+    else:
+        return []
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        group_id = str(candidate).strip()
+        if not group_id or group_id in seen:
+            continue
+        seen.add(group_id)
+        deduped.append(group_id)
+    return deduped
+
+
+def _find_case_insensitive_key(
+    mapping: dict[str, Any] | None,
+    candidates: list[str],
+) -> tuple[str | None, dict[str, Any]]:
+    """Find first matching dict key by case-insensitive lookup."""
+    if not isinstance(mapping, dict):
+        return None, {}
+
+    normalized_lookup: dict[str, tuple[str, Any]] = {}
+    for raw_key, raw_value in mapping.items():
+        if not isinstance(raw_value, dict):
+            continue
+        normalized_lookup[str(raw_key).strip().lower()] = (str(raw_key), raw_value)
+
+    for candidate in candidates:
+        match = normalized_lookup.get(candidate)
+        if match:
+            return match[0], match[1]
+    return None, {}
+
+
+def _resolve_sharing_config(
+    config_dict: dict[str, Any],
+    query_config: DomainQuery,
+    country_config: DomainCountry,
+) -> dict[str, Any] | None:
+    """
+    Resolve additive sharing settings from agol_metadata.yml.
+
+    Precedence:
+    1) sharing.default
+    2) sharing.by_country[iso3|iso2|country_name]
+    3) sharing.by_country[...].by_query[query_name]
+    """
+    sharing_cfg = config_dict.get("sharing")
+    if not isinstance(sharing_cfg, dict):
+        return None
+
+    default_cfg = sharing_cfg.get("default", {})
+    if not isinstance(default_cfg, dict):
+        default_cfg = {}
+
+    country_candidates = [
+        country_config.iso3.lower(),
+        country_config.iso2.lower(),
+        country_config.name.strip().lower(),
+    ]
+    country_key, country_cfg = _find_case_insensitive_key(
+        sharing_cfg.get("by_country"),
+        country_candidates,
+    )
+
+    query_cfg: dict[str, Any] = {}
+    query_key: str | None = None
+    if country_cfg:
+        query_key, query_cfg = _find_case_insensitive_key(
+            country_cfg.get("by_query"),
+            [query_config.name.strip().lower()],
+        )
+
+    visibility = _normalize_visibility(default_cfg.get("visibility"))
+    for cfg in (country_cfg, query_cfg):
+        if "visibility" in cfg:
+            visibility = _normalize_visibility(cfg.get("visibility"))
+
+    group_ids: list[str] = []
+    for cfg in (default_cfg, country_cfg, query_cfg):
+        group_ids.extend(_normalize_groups(cfg.get("groups")))
+    group_ids = _normalize_groups(group_ids)
+
+    policy = str(sharing_cfg.get("policy", "additive")).strip().lower() or "additive"
+    if policy != "additive":
+        logger.warning("Unsupported sharing policy '%s'; using additive mode.", policy)
+        policy = "additive"
+
+    on_missing_group = str(sharing_cfg.get("on_missing_group", "warn")).strip().lower() or "warn"
+    if on_missing_group not in {"warn", "fail"}:
+        logger.warning(
+            "Unsupported sharing on_missing_group '%s'; using warn behavior.",
+            on_missing_group,
+        )
+        on_missing_group = "warn"
+
+    return {
+        "policy": policy,
+        "on_missing_group": on_missing_group,
+        "visibility": visibility,
+        "groups": group_ids,
+        "context": {
+            "country_key": (country_key or ""),
+            "query_key": (query_key or ""),
+            "query_name": query_config.name,
+            "country_name": country_config.name,
+            "country_iso2": country_config.iso2.lower(),
+            "country_iso3": country_config.iso3.lower(),
+        },
+    }
 
 
 def load_config(
@@ -159,6 +299,7 @@ def format_metadata_from_config(
     organization = config_dict.get('organization', {})
     
     # Create variable substitution dictionary
+    release_value = config_dict.get("overture", {}).get("release") or Config().overture.release
     variables = {
         'country_name': country_config.name,
         'iso2': country_config.iso2,
@@ -168,7 +309,7 @@ def format_metadata_from_config(
         'sector_description': query_config.sector_description or f"{query_config.type} data",
         'sector_tag': query_config.sector_tag or query_config.name,
         'data_type': query_config.data_type or query_config.type.title(),
-        'release': Config().overture.release,
+        'release': release_value,
         'update_frequency': organization.get('update_frequency', 'Monthly'),
         'contact_email': organization.get('contact_email', 'contact@example.com'),
         'license': organization.get('license', 'Internal use only'),
@@ -260,6 +401,10 @@ def format_metadata_from_config(
     item_id = query_agol.get('item_id') or query_agol.get('service_id')
     if item_id:
         formatted_metadata['item_id'] = str(item_id).strip()
+
+    sharing_payload = _resolve_sharing_config(config_dict, query_config, country_config)
+    if sharing_payload is not None:
+        formatted_metadata["sharing"] = sharing_payload
     
     return formatted_metadata
 

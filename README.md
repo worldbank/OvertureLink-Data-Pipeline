@@ -70,6 +70,30 @@ On macOS/Linux:
 **Username/Password (Non‑2FA or Service Accounts)**
 - Set `AGOL_USERNAME` and `AGOL_PASSWORD` as shown in `.env.example`.
 
+### Country-Based Group Sharing (Optional)
+Configure AGOL item sharing in `src/o2agol/data/agol_metadata.yml` so each country can publish to different groups without code changes.
+
+```yaml
+sharing:
+  policy: "additive"
+  on_missing_group: "warn"
+  default:
+    visibility: "private"
+    groups: []
+  by_country:
+    afg:
+      visibility: "org"
+      groups: ["0123456789abcdef0123456789abcdef"]
+      by_query:
+        roads:
+          groups: ["abcdef0123456789abcdef0123456789"]
+```
+
+- Use AGOL **group IDs** (not titles).
+- Country keys are matched in this order: ISO3, ISO2, then country name (case-insensitive).
+- Sharing is additive: existing shares are kept, configured shares are added.
+- Missing or inaccessible groups are logged as warnings and skipped (publish continues).
+
 ### 4. Run commands
 The Python CLI has three main commands: uploading to AGOL `arcgis-upload` , downloading as geojson `export`, or download dump for local use as needed `overture-dump`. 
 

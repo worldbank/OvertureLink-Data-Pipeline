@@ -16,6 +16,29 @@ organization:
   license: "Internal use only. External sharing requires approval."
   update_frequency: "Monthly"
 
+# ArcGIS Online Sharing Configuration (optional)
+# This controls post-publish item sharing in additive mode:
+# - Existing shares are preserved
+# - New configured shares are added
+# - Missing/inaccessible groups are warned and skipped
+#sharing:
+#  policy: "additive"
+#  on_missing_group: "warn"
+#  default:
+#    visibility: "public"  # private | org | public
+#    groups: [""]             # AGOL group IDs
+#  by_country:
+    # Country key supports: ISO3 (preferred), ISO2, or country name (case-insensitive)
+    # afg:
+    #   visibility: "org"
+    #   groups: ["0123456789abcdef0123456789abcdef"]
+    #   by_query:
+    #     roads:
+    #       groups: ["abcdef0123456789abcdef0123456789"]
+    #     education:
+    #       visibility: "public"
+    #       groups: ["fedcba9876543210fedcba9876543210"]
+
 # Global Content Templates (Using dynamic variables)
 # Country data will be injected dynamically based on --country parameter
 templates:
