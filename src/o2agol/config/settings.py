@@ -332,12 +332,12 @@ class Config:
             logger.warning(f"No .env file found at {target}, using system environment variables only")
         
         # Store for debugging
-        self._loaded_env_files = loaded_files
+        self._loaded_env_files = [str(target)] if target.exists() else []
         self._project_root_used = str(self.project_root)
-        
+
         # Debug logging
         logger.debug(f"Project root: {self.project_root}")
-        logger.debug(f"Loaded env files: {loaded_files}")
+        logger.debug(f"Loaded env files: {self._loaded_env_files}")
         logger.debug(f"Environment: {self.environment}")
 
     def _ensure_agol_loaded(self) -> None:
