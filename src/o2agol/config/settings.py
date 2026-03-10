@@ -25,6 +25,7 @@ Environment Variables (AGOL_ standard):
 import hashlib
 import logging
 import os
+import requests
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -36,6 +37,18 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+# Overture Maps catalog URL for fetching latest release information
+CATALOG_URL = "https://stac.overturemaps.org/catalog.json"
+def get_latest_release():
+    response = requests.get(CATALOG_URL)
+    data = response.json()
+    
+    # The 'latest' field usually contains the most recent version string
+    latest = data.get("latest")
+    
+    # If you specifically want to check if 2026-02-18.0 exists in the history
+    releases = [link['href'] for link in data.get('links', []) if 'releases' in link['href']]
+    return latest, releases
 
 class LogContext(Enum):
     """Context-aware logging levels for pipeline operations."""
@@ -393,7 +406,13 @@ class Config:
     def _load_overture_config(self) -> None:
         """Load Overture Maps configuration with sensible defaults."""
         base_url = os.getenv("OVERTURE_BASE_URL", "s3://overturemaps-us-west-2/release")
-        release = os.getenv("OVERTURE_RELEASE")
+        try:
+            logger.info("Attempting to get latest Overture release from catalog for configuration")
+            release = get_latest_release()[0]  # Get the latest release from the catalog
+        except Exception as e:
+            logger.warning(f"Failed to get latest Overture release from catalog: {e}. Falling back to default.")
+            release = os.getenv("OVERTURE_RELEASE")
+            
         logger.info(f"Config loading OVERTURE_RELEASE from env: {release}")
 
         try:
