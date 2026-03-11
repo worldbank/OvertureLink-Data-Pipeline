@@ -388,38 +388,52 @@ class FeatureLayerManager:
 
             valid_groups.append(group_id)
 
-        already_shared = [group_id for group_id in valid_groups if group_id in current_group_ids]
-        groups_to_share = [group_id for group_id in valid_groups if group_id not in current_group_ids]
+        # Re-fetch group objects for the IDs that need sharing (validation already passed above)
+        groups_to_share_objs = {
+            gid: self.gis.groups.get(gid)
+            for gid in valid_groups
+            if gid not in current_group_ids
+        }
+        already_shared = [gid for gid in valid_groups if gid in current_group_ids]
+        groups_to_share = list(groups_to_share_objs.keys())
         newly_shared_count = 0
 
         if needs_visibility_upgrade or groups_to_share:
             try:
-                share_result = item.share(
-                    everyone=(effective_visibility == "public"),
-                    org=(effective_visibility in ("org", "public")),
-                    groups=groups_to_share or None,
-                )
-                not_shared_with: list[str] = []
-                if isinstance(share_result, dict):
-                    raw_not_shared = share_result.get("notSharedWith") or share_result.get("notSharedwith")
-                    if isinstance(raw_not_shared, (list, tuple, set)):
-                        for entry in raw_not_shared:
-                            value = str(entry).strip()
-                            if value:
-                                not_shared_with.append(value)
-
-                if not_shared_with:
-                    logger.warning(
-                        "AGOL could not share with %d group(s): %s. "
-                        "Ensure the publishing user/app is a member and has share permissions.",
-                        len(not_shared_with),
-                        ", ".join(not_shared_with),
+                # Set visibility first (everyone/org flags)
+                if needs_visibility_upgrade:
+                    item.share(
+                        everyone=(effective_visibility == "public"),
+                        org=(effective_visibility in ("org", "public")),
                     )
 
-                _, current_group_ids = self._get_current_item_sharing(item)
-                newly_shared_count = len(
-                    [group_id for group_id in groups_to_share if group_id in current_group_ids]
-                )
+                # Share to each group individually using the group object + REST fallback
+                for gid, group_obj in groups_to_share_objs.items():
+                    if group_obj is None:
+                        logger.warning("Group object not found for id '%s'; skipping.", gid)
+                        continue
+                    shared = False
+                    # Primary: newer API method
+                    try:
+                        result = item.sharing.groups.add(group=group_obj)
+                        shared = bool(result)
+                    except Exception:
+                        pass
+                    # Fallback: direct REST call
+                    if not shared:
+                        try:
+                            owner = getattr(item, "owner", None) or getattr(self.gis.users.me, "username", "")
+                            url = f"{self.gis.url}/sharing/rest/content/users/{owner}/items/{item.id}/share"
+                            self.gis._con.post(url, {"f": "json", "groups": gid})
+                            shared = True
+                        except Exception as e:
+                            logger.warning("REST fallback share failed for group '%s': %s", gid, e)
+                    if shared:
+                        newly_shared_count += 1
+                        logger.debug("Shared item with group '%s' (%s).", group_obj.title, gid)
+                    else:
+                        logger.warning("Could not share item with group '%s' (%s).", group_obj.title, gid)
+
             except Exception as e:
                 logger.warning("Failed to apply AGOL sharing update; continuing publish: %s", e)
 
@@ -431,6 +445,27 @@ class FeatureLayerManager:
             len(already_shared),
             len(skipped_missing),
         )
+
+    # ----------------------------
+    # Service capability management
+    # ----------------------------
+    def _ensure_extract_capability(self, flc: FeatureLayerCollection) -> None:
+        """
+        Ensure the Extract capability is enabled on the feature service so that
+        organization users can download the data. Reads existing capabilities first
+        and only adds Extract — never removes other capabilities.
+        """
+        raw = flc.properties.get("capabilities", "")
+        current_caps = {c.strip() for c in raw.split(",") if c.strip()}
+
+        if "Extract" in current_caps:
+            logger.debug("Extract capability already enabled; no update needed.")
+            return
+
+        new_caps = current_caps | {"Extract"}
+        caps_str = ",".join(sorted(new_caps))
+        flc.manager.update_definition({"capabilities": caps_str})
+        logger.info("Enabled Extract capability: %s -> %s", raw or "(none)", caps_str)
 
     # ----------------------------
     # Append via staged item (server-side)
@@ -858,6 +893,11 @@ class FeatureLayerManager:
             self._apply_item_sharing(item, metadata or {})
         except Exception as e:
             logger.warning(f"Skipping item sharing update: {e}")
+
+        try:
+            self._ensure_extract_capability(flc)
+        except Exception as e:
+            logger.warning("Failed to enable Extract capability: %s", e)
 
         return existing_id
     
