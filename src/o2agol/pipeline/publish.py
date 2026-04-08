@@ -12,15 +12,16 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Mapping, Optional
-import tempfile
 from pathlib import Path
+from typing import Any, Optional
 
 import geopandas as gpd
-from arcgis.features import Feature, FeatureLayerCollection
+from arcgis.features import FeatureLayerCollection
 
 # ----------------------------
 # Global knobs (env‑tunable)
@@ -515,10 +516,10 @@ class FeatureLayerManager:
         """
         # Import Exporter (support both project layouts)
         try:
-            from .export import Exporter                   # layout A
+            from .export import Exporter  # layout A
         except Exception:
             try:
-                from .pipeline.export import Exporter      # layout B
+                from .pipeline.export import Exporter  # layout B
             except Exception as e:
                 raise ImportError("Exporter not found. Ensure export.py is importable.") from e
 
@@ -717,7 +718,7 @@ class FeatureLayerManager:
         self,
         layer_data: gpd.GeoDataFrame | Mapping[str, gpd.GeoDataFrame],
         service_name: str,
-        metadata: Dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
         mode: str = "auto",
         flc: FeatureLayerCollection | None = None,
         staging_format: str = StagingFormat.GPKG,
@@ -737,7 +738,7 @@ class FeatureLayerManager:
             layer_data = {service_name: layer_data}
 
         # Sanitize our own layer keys for stability
-        layer_data_copy: Dict[str, gpd.GeoDataFrame] = {
+        layer_data_copy: dict[str, gpd.GeoDataFrame] = {
             self._sanitize_layer_name(k): v for k, v in layer_data.items()
         }
 

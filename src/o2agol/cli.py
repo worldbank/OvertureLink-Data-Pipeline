@@ -1,30 +1,64 @@
 import logging
+import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Optional, cast
 
+import geopandas as gpd
+import pandas as pd
 import typer
 import yaml
 from dotenv import load_dotenv
 
-import geopandas as gpd
-import pandas as pd
+# Hardening pass Phase 1: lazy CLI wiring.
+#
+# Previously this module called load_dotenv() at import time, which meant
+# `import o2agol.cli` had filesystem side effects and CliRunner-based tests
+# inherited them. Now: imports are at module top (no E402 noise), but
+# environment loading + cleanup-handler registration happen inside the Typer
+# @app.callback() that runs only when a command is actually invoked.
+#
+# Audit performed 2026-04-08 (`grep -rnE "from o2agol\.cli import|import o2agol\.cli" src/`)
+# returned zero hits, so no internal caller relies on import-time side effects.
 
-# Load environment variables BEFORE importing local modules that use them
-load_dotenv()
-
-from .cleanup import full_cleanup_check, register_cleanup_handlers, cleanup_current_pid
+from .cleanup import cleanup_current_pid, full_cleanup_check, register_cleanup_handlers
 from .config.settings import Config, PipelineLogger
 from .config_loader import get_available_queries, load_config, validate_query_exists
 from .domain.enums import ClipStrategy, ExportFormat, StagingFormat
 from .domain.models import Country, Query, RunOptions
-from .pipeline.export import Exporter, generate_export_filename
+from .pipeline.export import Exporter
 from .pipeline.publish import FeatureLayerManager
 from .pipeline.source import OvertureSource
+from .utils import bind_run_context, setup_logging as _setup_logging_impl
 
 app = typer.Typer(help="Overture Maps Pipeline: Source -> Transform -> Publish/Export")
+
+
+@app.callback()
+def _main_callback(
+    ctx: typer.Context,
+    trace: bool = typer.Option(
+        False,
+        "--trace",
+        help="Emit verbose per-stage trace logging (implies --verbose). "
+             "Sub-stage timings are written to stdout/log file as JSON lines.",
+    ),
+) -> None:
+    """Lazy initialization that runs once per CLI invocation, NOT at module import.
+
+    Loads .env, registers cleanup handlers, and stashes the trace flag for
+    downstream subcommands. Subcommands still call ``setup_logging`` themselves
+    with their own ``--verbose`` / ``--log-to-file`` preferences; this callback
+    only handles process-wide setup that must happen exactly once.
+    """
+    load_dotenv()
+    register_cleanup_handlers()
+    if trace:
+        os.environ["O2AGOL_TRACE"] = "1"
+    ctx.ensure_object(dict)
+    ctx.obj["trace"] = trace
 
 
 # Helper functions to replace compat module functionality
@@ -99,44 +133,35 @@ def publish_to_agol(
             manager.close()
 
 
-def setup_logging(verbose: bool, target_name: Optional[str] = None, mode: Optional[str] = None, enable_file_logging: bool = False):
+def setup_logging(
+    verbose: bool,
+    target_name: Optional[str] = None,
+    mode: Optional[str] = None,
+    enable_file_logging: bool = False,
+) -> None:
+    """Configure logging for a CLI command.
+
+    Hardening pass Phase 1: this is now a thin shim over ``utils.setup_logging``
+    which uses structlog as the JSON renderer for both structured and stdlib
+    log calls. The duplicate implementation that used to live here was deleted
+    as part of the DRY consolidation.
+
+    The trace flag (set by the global ``--trace`` option in the Typer callback)
+    is read from the ``O2AGOL_TRACE`` environment variable.
     """
-    Configure logging with optional timestamped file output for production operations.
-    
-    Args:
-        verbose: Enable debug-level logging if True
-        target_name: Target data type for log file naming
-        mode: Operation mode for log file naming  
-        enable_file_logging: Create timestamped log files when True
-    """
-    level = logging.DEBUG if verbose else logging.INFO
-    handlers = [logging.StreamHandler(sys.stdout)]
-    
-    if enable_file_logging and target_name and mode:
-        # Create logs directory for timestamped files
-        logs_dir = Path("logs")
-        logs_dir.mkdir(exist_ok=True)
-        
-        # Generate timestamped log filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = logs_dir / f"{target_name}_{mode}_{timestamp}.log"
-        
-        # Add file handler for persistent logging
-        handlers.append(logging.FileHandler(log_file, encoding='utf-8'))
-        
-        # Log file location for reference
-        print(f"Logging to: {log_file}")
-    
-    logging.basicConfig(
-        level=level, 
-        format="%(asctime)s [%(levelname)s] %(message)s", 
-        datefmt="%H:%M:%S",
-        handlers=handlers,
-        force=True
+    trace = os.environ.get("O2AGOL_TRACE") == "1"
+    _setup_logging_impl(
+        verbose=verbose,
+        target_name=target_name,
+        mode=mode,
+        enable_file_logging=enable_file_logging,
+        trace=trace,
     )
 
     # Prevent credential leakage from third-party DEBUG logging.
     # Some OAuth/HTTP libraries log token request payloads (including client_secret).
+    # The structlog redaction filter would catch these too, but silencing them
+    # at the source avoids the cost of formatting the message in the first place.
     for noisy_logger in [
         "requests_oauthlib",
         "oauthlib",
@@ -145,6 +170,26 @@ def setup_logging(verbose: bool, target_name: Optional[str] = None, mode: Option
         "arcgis.gis._impl._con._connection",
     ]:
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
+
+def _bind_command_context(
+    country: Optional[str],
+    theme: Optional[str],
+    release: Optional[str] = None,
+) -> None:
+    """Bind structlog run context for the current CLI command.
+
+    After this is called, every downstream ``log_stage(...)``, ``logging.info(...)``,
+    and ``StageTimer`` emission carries ``country``, ``theme``, and ``release``
+    fields automatically. Tolerates None values by substituting "unknown".
+
+    Hardening pass Phase 1.
+    """
+    bind_run_context(
+        country=(country or "unknown"),
+        theme=(theme or "unknown"),
+        release=(release or os.environ.get("OVERTURE_RELEASE") or "latest"),
+    )
 
 
 def is_template_config(config_path: str) -> bool:
@@ -425,7 +470,8 @@ def process_target(
     
     # Initialize logging with optional file output
     setup_logging(verbose, target_name, mode, log_to_file)
-    
+    _bind_command_context(country=country, theme=target_name)
+
     # Register cleanup handlers for graceful interruption handling
     register_cleanup_handlers()
     
@@ -745,6 +791,7 @@ def process_target_for_export(
     """
     # Initialize logging with optional file output
     setup_logging(verbose, target_name, "export", log_to_file)
+    _bind_command_context(country=country, theme=target_name)
     
     # Register cleanup handlers for graceful interruption handling
     register_cleanup_handlers()
@@ -978,7 +1025,8 @@ def arcgis_upload(
     try:
         # Setup logging based on user preferences
         setup_logging(verbose, query, mode, log_to_file)
-        
+        _bind_command_context(country=country, theme=query)
+
         # Import pipeline components
         from .config.settings import Config
         from .domain.enums import ClipStrategy, Mode
@@ -1170,7 +1218,8 @@ def export_data_command(
     try:
         # Setup logging based on user preferences
         setup_logging(verbose, query, "export", log_to_file)
-        
+        _bind_command_context(country=country, theme=query)
+
         # Import pipeline components
         from pathlib import Path
 
@@ -1487,6 +1536,7 @@ def overture_dump(
     # Setup logging
     log_mode = "dump"
     setup_logging(verbose, query, log_mode, log_to_file)
+    _bind_command_context(country=country, theme=query, release=release)
     
     # Initialize comprehensive timing
     from datetime import datetime

@@ -39,6 +39,7 @@ logs/
 *.txt
 .ruff_cache/
 overturedump/
+.pytest_cache/
 
 # Development, debugging and experimental features
 dev/

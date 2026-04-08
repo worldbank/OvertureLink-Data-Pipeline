@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .utils import get_project_temp_dir, get_pid_temp_dir
+from .utils import get_pid_temp_dir, get_project_temp_dir  # noqa: F401  (re-export for source.py)
 
 
 def is_directory_tree_empty(directory: Path) -> bool:
