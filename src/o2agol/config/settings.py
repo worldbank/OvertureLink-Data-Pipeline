@@ -31,11 +31,30 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+import requests
 from arcgis.gis import GIS
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+# Overture Maps STAC catalog endpoint used to resolve the latest release identifier.
+CATALOG_URL = "https://stac.overturemaps.org/catalog.json"
+CATALOG_TIMEOUT_SECONDS = 5.0
+
+
+def get_latest_overture_release(timeout: float = CATALOG_TIMEOUT_SECONDS) -> str:
+    """Return the latest Overture release identifier from the STAC catalog.
+
+    Raises:
+        requests.RequestException: On network failure or non-2xx response.
+        ValueError: If the catalog response omits the 'latest' field.
+    """
+    response = requests.get(CATALOG_URL, timeout=timeout)
+    response.raise_for_status()
+    latest = response.json().get("latest")
+    if not latest:
+        raise ValueError("Overture catalog response missing 'latest' field")
+    return latest
 
 class LogContext(Enum):
     """Context-aware logging levels for pipeline operations."""
@@ -393,8 +412,22 @@ class Config:
     def _load_overture_config(self) -> None:
         """Load Overture Maps configuration with sensible defaults."""
         base_url = os.getenv("OVERTURE_BASE_URL", "s3://overturemaps-us-west-2/release")
+
+        # OVERTURE_RELEASE supports three modes:
+        #   - unset or "latest": resolve dynamically from the Overture STAC catalog
+        #   - explicit release (e.g. "2025-07-23.0"): pin for reproducible runs
         release = os.getenv("OVERTURE_RELEASE")
-        logger.info(f"Config loading OVERTURE_RELEASE from env: {release}")
+        if release and release.lower() != "latest":
+            logger.info(f"Using pinned Overture release from OVERTURE_RELEASE: {release}")
+        else:
+            try:
+                release = get_latest_overture_release()
+                logger.info(f"Resolved latest Overture release from catalog: {release}")
+            except Exception as e:
+                raise ConfigurationError(
+                    f"Failed to resolve Overture release from catalog ({e}); "
+                    "set OVERTURE_RELEASE to pin a specific release."
+                )
 
         try:
             self.overture = OvertureConfig(
