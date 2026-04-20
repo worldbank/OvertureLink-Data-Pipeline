@@ -5,7 +5,6 @@ src/o2agol/utils.py:0: error: Missing type parameters for generic type "Callable
 src/o2agol/utils.py:0: error: Missing type parameters for generic type "Callable"  [type-arg]
 src/o2agol/utils.py:0: error: Function is missing a type annotation  [no-untyped-def]
 src/o2agol/utils.py:0: error: Exception must be derived from BaseException  [misc]
-src/o2agol/utils.py:0: error: Library stubs not installed for "yaml"  [import-untyped]
 src/o2agol/utils.py:0: error: Returning Any from function declared to return "dict[str, Any]"  [no-any-return]
 src/o2agol/pipeline/export.py:0: error: Argument 1 to "get" of "dict" has incompatible type "ExportFormat | None"; expected "ExportFormat"  [arg-type]
 src/o2agol/pipeline/export.py:0: error: Item "None" of "ExportFormat | None" has no attribute "value"  [union-attr]
@@ -34,10 +33,6 @@ src/o2agol/pipeline/export.py:0: error: Incompatible types in assignment (expres
 src/o2agol/pipeline/export.py:0: error: Incompatible default for argument "country" (default has type "None", argument has type "str")  [assignment]
 src/o2agol/pipeline/export.py:0: note: PEP 484 prohibits implicit Optional. Accordingly, mypy has changed its default to no_implicit_optional=True
 src/o2agol/pipeline/export.py:0: note: Use https://github.com/hauntsaninja/no_implicit_optional to automatically upgrade your codebase
-src/o2agol/config/settings.py:0: error: Library stubs not installed for "requests"  [import-untyped]
-src/o2agol/config/settings.py:0: note: Hint: "python3 -m pip install types-requests"
-src/o2agol/config/settings.py:0: note: (or run "mypy --install-types" to install all missing stub packages)
-src/o2agol/config/settings.py:0: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports
 src/o2agol/config/settings.py:0: error: Returning Any from function declared to return "str"  [no-any-return]
 src/o2agol/config/settings.py:0: error: Function is missing a return type annotation  [no-untyped-def]
 src/o2agol/config/settings.py:0: note: Use "-> None" if function does not return a value
@@ -63,7 +58,6 @@ src/o2agol/config/settings.py:0: note: Use "-> None" if function does not return
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "profile"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "token_expiration"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "auth_method"  [union-attr]
-src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "client_secret"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "profile"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "auth_method"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "profile"  [union-attr]
@@ -77,21 +71,16 @@ src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" 
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "api_key"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "portal_url"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "client_id"  [union-attr]
-src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "client_secret"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "auth_method"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "portal_url"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "client_id"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "profile"  [union-attr]
-src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "portal_url"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "username"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "password"  [union-attr]
-src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "profile"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "auth_method"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "auth_method"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "api_key"  [union-attr]
 src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "auth_method"  [union-attr]
-src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "auth_method"  [union-attr]
-src/o2agol/config/settings.py:0: error: Item "None" of "AGOLCredentials | None" has no attribute "client_secret"  [union-attr]
 src/o2agol/pipeline/publish.py:0: error: Function is missing a type annotation for one or more arguments  [no-untyped-def]
 src/o2agol/pipeline/publish.py:0: error: Function is missing a return type annotation  [no-untyped-def]
 src/o2agol/pipeline/publish.py:0: error: Missing type parameters for generic type "dict"  [type-arg]
@@ -127,7 +116,6 @@ src/o2agol/domain/models.py:0: error: Missing type parameters for generic type "
 src/o2agol/domain/models.py:0: error: Missing type parameters for generic type "dict"  [type-arg]
 src/o2agol/domain/models.py:0: error: Function is missing a return type annotation  [no-untyped-def]
 src/o2agol/domain/models.py:0: note: Use "-> None" if function does not return a value
-src/o2agol/config_loader.py:0: error: Library stubs not installed for "yaml"  [import-untyped]
 src/o2agol/config_loader.py:0: error: Incompatible default for argument "config_path" (default has type "None", argument has type "str")  [assignment]
 src/o2agol/config_loader.py:0: note: PEP 484 prohibits implicit Optional. Accordingly, mypy has changed its default to no_implicit_optional=True
 src/o2agol/config_loader.py:0: note: Use https://github.com/hauntsaninja/no_implicit_optional to automatically upgrade your codebase
@@ -197,8 +185,6 @@ src/o2agol/pipeline/source.py:0: error: Function is missing a type annotation  [
 src/o2agol/pipeline/source.py:0: error: Call to untyped function "has_primary_category" in typed context  [no-untyped-call]
 src/o2agol/pipeline/source.py:0: error: Function is missing a type annotation  [no-untyped-def]
 src/o2agol/pipeline/source.py:0: error: Call to untyped function "has_primary_category_in_list" in typed context  [no-untyped-call]
-src/o2agol/cli.py:0: error: Library stubs not installed for "yaml"  [import-untyped]
-src/o2agol/cli.py:0: note: Hint: "python3 -m pip install types-PyYAML"
 src/o2agol/cli.py:0: error: Function is missing a return type annotation  [no-untyped-def]
 src/o2agol/cli.py:0: error: Missing type parameters for generic type "dict"  [type-arg]
 src/o2agol/cli.py:0: error: Unexpected keyword argument "verbose" for "RunOptions"  [call-arg]

@@ -599,6 +599,7 @@ class Config:
                     )
 
             gis = None
+            profile_name = self.agol.profile if self.agol is not None and self.agol.profile else None
             if self.agol.api_key:
                 gis = GIS(
                     url=self.agol.portal_url,
@@ -622,7 +623,7 @@ class Config:
                 gis = GIS(
                     url=self.agol.portal_url,
                     client_id=self.agol.client_id,
-                    profile=self.agol.profile or None,
+                    profile=profile_name,
                 )
 
             # Username/password fallback (no OAuth, no API key).
@@ -632,7 +633,7 @@ class Config:
                     username=self.agol.username,
                     password=self.agol.password,
                     expiration=token_expiration,
-                    profile=self.agol.profile or None,
+                    profile=profile_name,
                 )
 
             # Store connection and verify
