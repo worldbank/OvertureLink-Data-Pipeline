@@ -12,7 +12,6 @@ from typing import Any
 import geopandas as gpd
 from pydantic import BaseModel, Field, model_validator
 
-
 _CORE_REQUIRED_COLUMNS = {"id", "geometry"}
 _RUNTIME_METADATA_COLUMNS = {"processed_date", "country_iso3", "country_name"}
 
@@ -48,7 +47,7 @@ class PublishLayerContract(BaseModel):
     required_columns: list[str] = Field(min_length=1)
 
     @model_validator(mode="after")
-    def _validate_columns(self) -> "PublishLayerContract":
+    def _validate_columns(self) -> PublishLayerContract:
         available = set(self.columns)
         missing = [column for column in self.required_columns if column not in available]
         if missing:
@@ -67,7 +66,7 @@ class PublishLayerContract(BaseModel):
         return self
 
     @classmethod
-    def from_geodataframe(cls, layer_name: str, gdf: gpd.GeoDataFrame) -> "PublishLayerContract":
+    def from_geodataframe(cls, layer_name: str, gdf: gpd.GeoDataFrame) -> PublishLayerContract:
         required = set(_CORE_REQUIRED_COLUMNS)
         if len(gdf) > 0:
             required |= _RUNTIME_METADATA_COLUMNS

@@ -47,7 +47,7 @@ def _normalize_groups(groups: Any) -> list[str]:
         return []
     if isinstance(groups, str):
         candidates: list[Any] = [groups]
-    elif isinstance(groups, (list, tuple, set)):
+    elif isinstance(groups, list | tuple | set):
         candidates = list(groups)
     else:
         return []

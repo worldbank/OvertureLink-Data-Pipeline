@@ -235,7 +235,7 @@ class FeatureLayerManager:
         """Accepts list/tuple/set or comma-separated string; returns a clean list or None."""
         if tags is None:
             return None
-        if isinstance(tags, (list, tuple, set)):
+        if isinstance(tags, list | tuple | set):
             normalized = []
             for tag in tags:
                 if tag is None:

@@ -87,7 +87,7 @@ def _redact_value(key: str, value: Any) -> Any:
         return "[REDACTED]"
     if isinstance(value, dict):
         return {k: _redact_value(k, v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         # Lists themselves don't have keys; only redact dict members inside.
         return type(value)(
             _redact_value("", v) if not isinstance(v, dict) else _redact_value("dict", v)
