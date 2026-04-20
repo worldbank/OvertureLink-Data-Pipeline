@@ -47,8 +47,8 @@ dev = [
     # Test and lint toolchain
     "pytest>=8.2.0",
     "ruff>=0.5.6",
-    "mypy>=1.10.0",
-    "mypy-baseline>=0.7.0",       # Mypy ratchet: fail only on NEW strict errors
+    "mypy==1.20.0",               # Pin to keep mypy-baseline message text stable in CI
+    "mypy-baseline==0.7.3",       # Keep ratchet behavior aligned with checked-in lockfiles
     "pip-tools>=7.4.0",           # pip-compile for per-platform lockfiles
     "pre-commit>=3.7.0",          # Local ruff+mypy gate
     # Test libraries (Phase 2+)
