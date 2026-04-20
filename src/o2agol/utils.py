@@ -233,7 +233,7 @@ class StageTimer:
         """Attach additional fields before the stage exits (e.g. row counts known mid-stage)."""
         self.fields.update(fields)
 
-    def __enter__(self) -> "StageTimer":
+    def __enter__(self) -> StageTimer:
         self._start = time.perf_counter()
         if os.environ.get("O2AGOL_TRACE") == "1":
             structlog.get_logger().debug(f"{self.stage}.enter", **self.fields)

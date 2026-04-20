@@ -44,7 +44,12 @@ overturedump/
 # Development, debugging and experimental features
 dev/
 tests/
-!tests/
-!tests/test_config_loader_sharing.py
-!tests/test_publish_sharing.py
 docs/
+src/o2agol/testing/
+
+# Temporary local hardening artifacts
+.mypy-baseline
+.pre-commit-config.yaml
+Makefile
+.github/dependabot.yml
+.github/workflows/canary.yml

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -23,14 +24,17 @@ from typing import Any, Optional
 import geopandas as gpd
 from arcgis.features import FeatureLayerCollection
 
+from ..domain.contracts import validate_publish_contracts
+from ..utils import StageTimer, log_stage
+
 # ----------------------------
-# Global knobs (env‑tunable)
+# Global knobs (env-tunable)
 # ----------------------------
-BATCH_THRESHOLD  = int(os.environ.get("BatchThreshold", "200000"))   # switch to batching above this many records
-BATCH_SIZE       = int(os.environ.get("BatchSize", "500000"))        # starting part size per append job
-BATCH_MIN        = int(os.environ.get("BatchMin", "50000"))          # floor for adaptive halves
-SEED_SIZE        = int(os.environ.get("SeedSize", "2000"))           # small seed to establish schema
-APPEND_TIMEOUT_S = int(os.environ.get("AppendTimeout", "14400"))
+BATCH_THRESHOLD  = int(os.environ.get("BatchThreshold", "200000"))   # noqa: SIM112  # switch to batching above this many records
+BATCH_SIZE       = int(os.environ.get("BatchSize", "500000"))        # noqa: SIM112  # starting part size per append job
+BATCH_MIN        = int(os.environ.get("BatchMin", "50000"))          # noqa: SIM112  # floor for adaptive halves
+SEED_SIZE        = int(os.environ.get("SeedSize", "2000"))           # noqa: SIM112  # small seed to establish schema
+APPEND_TIMEOUT_S = int(os.environ.get("AppendTimeout", "14400"))     # noqa: SIM112
 USE_ASYNC_APPEND = os.environ.get("USE_ASYNC_APPEND", "false").lower() == "true"  # Control async behavior
 
 
@@ -225,10 +229,8 @@ class FeatureLayerManager:
                     pass
         finally:
             # Avoid hard failures if the temp file is still locked on Windows
-            try:
+            with contextlib.suppress(Exception):
                 shutil.rmtree(tmpdir, ignore_errors=True)
-            except Exception:
-                pass
     def _normalize_tags(self, tags) -> list[str] | None:
         """Accepts list/tuple/set or comma-separated string; returns a clean list or None."""
         if tags is None:
@@ -298,6 +300,14 @@ class FeatureLayerManager:
         if isinstance(group_entry, dict):
             return str(group_entry.get("id") or group_entry.get("groupid") or "").strip()
         return str(getattr(group_entry, "id", "")).strip()
+
+    def _share_item_with_group(self, item: Any, group_id: str) -> bool:
+        """Share an item to a single group using the public ArcGIS Item API."""
+        result = item.share(groups=[group_id])
+        if isinstance(result, Mapping):
+            not_shared = result.get("notSharedWith") or []
+            return group_id not in {self._extract_group_id(entry) for entry in not_shared}
+        return True
 
     def _get_current_item_sharing(self, item) -> tuple[str, set[str]]:
         """
@@ -408,27 +418,16 @@ class FeatureLayerManager:
                         org=(effective_visibility in ("org", "public")),
                     )
 
-                # Share to each group individually using the group object + REST fallback
+                # Share to each group individually using the public Item.share API
                 for gid, group_obj in groups_to_share_objs.items():
                     if group_obj is None:
                         logger.warning("Group object not found for id '%s'; skipping.", gid)
                         continue
                     shared = False
-                    # Primary: newer API method
                     try:
-                        result = item.sharing.groups.add(group=group_obj)
-                        shared = bool(result)
-                    except Exception:
-                        pass
-                    # Fallback: direct REST call
-                    if not shared:
-                        try:
-                            owner = getattr(item, "owner", None) or getattr(self.gis.users.me, "username", "")
-                            url = f"{self.gis.url}/sharing/rest/content/users/{owner}/items/{item.id}/share"
-                            self.gis._con.post(url, {"f": "json", "groups": gid})
-                            shared = True
-                        except Exception as e:
-                            logger.warning("REST fallback share failed for group '%s': %s", gid, e)
+                        shared = self._share_item_with_group(item, gid)
+                    except Exception as e:
+                        logger.warning("Item.share failed for group '%s': %s", gid, e)
                     if shared:
                         newly_shared_count += 1
                         logger.debug("Shared item with group '%s' (%s).", group_obj.title, gid)
@@ -731,6 +730,12 @@ class FeatureLayerManager:
         Returns the item id of the Feature Service.
         """
 
+        total_features = sum(
+            len(v) for v in (layer_data.values() if isinstance(layer_data, dict) else [layer_data])
+        )
+        log_stage("publish.start", service=service_name, mode=mode,
+                  total_features=total_features, staging_format=staging_format)
+
         normalized_staging_format = self._normalize_staging_format(staging_format)
 
         # Normalize input to dict
@@ -742,7 +747,12 @@ class FeatureLayerManager:
             self._sanitize_layer_name(k): v for k, v in layer_data.items()
         }
 
+        # Validate the transformed AGOL payload before any network call.
+        validate_publish_contracts(layer_data_copy, metadata)
+
         # --- DISCOVERY: resolve existing service OR create it -----------------
+        _discovery_timer = StageTimer("publish.item_discovery", service=service_name)
+        _discovery_timer.__enter__()
         item = None
         created_new_service = False
         current_user = self.gis.users.me
@@ -860,6 +870,8 @@ class FeatureLayerManager:
                 raise RuntimeError(f"Feature Service '{service_name}' not found. Create it before publishing.")
 
         existing_id = item.id
+        _discovery_timer.add(item_id=existing_id, created_new=created_new_service)
+        _discovery_timer.__exit__(None, None, None)
         # --- END DISCOVERY ----------------------------------------------------
 
 
@@ -888,7 +900,9 @@ class FeatureLayerManager:
             layer_mode = mode
             if created_new_service:
                 layer_mode = "initial"
-            self.publish_or_update(target_layer, gdf, mode=layer_mode, staging_format=normalized_staging_format)
+            with StageTimer("publish.sublayer", layer=key, mode=layer_mode,
+                            features=len(gdf)):
+                self.publish_or_update(target_layer, gdf, mode=layer_mode, staging_format=normalized_staging_format)
 
         try:
             self._apply_item_sharing(item, metadata or {})
@@ -900,35 +914,22 @@ class FeatureLayerManager:
         except Exception as e:
             logger.warning("Failed to enable Extract capability: %s", e)
 
+        log_stage("publish.complete", item_id=existing_id,
+                  layers=len(layer_data_copy), total_features=total_features)
         return existing_id
     
     def close(self):
         """Clean up GIS connection resources."""
         if hasattr(self, 'gis') and self.gis:
             try:
-                # Force close any active GIS sessions
-                if hasattr(self.gis, '_portal'):
-                    portal = self.gis._portal
-                    
-                    # Close the session if it exists
-                    if hasattr(portal, '_session') and portal._session:
-                        try:
-                            portal._session.close()
-                            logger.debug("Closed GIS portal session")
-                        except Exception:
-                            pass
-                    
-                    # Clear any connection pools
-                    if hasattr(portal, 'con') and hasattr(portal.con, '_session'):
-                        try:
-                            portal.con._session.close()
-                            logger.debug("Closed portal connection session")
-                        except Exception:
-                            pass
-                    
-                    # Set to None to release references
-                    self.gis._portal = None
-                
+                session = getattr(self.gis, "session", None)
+                if session is not None and hasattr(session, "close"):
+                    try:
+                        session.close()
+                        logger.debug("Closed GIS session")
+                    except Exception:
+                        pass
+
                 # Clear the GIS object reference
                 self.gis = None
                 logger.debug("GIS connection fully cleaned up")
@@ -936,7 +937,5 @@ class FeatureLayerManager:
             except Exception as e:
                 logger.debug(f"Error during GIS cleanup: {e}")
                 # Still try to clear the reference
-                try:
+                with contextlib.suppress(Exception):
                     self.gis = None
-                except Exception:
-                    pass

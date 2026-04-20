@@ -378,7 +378,7 @@ def format_metadata_from_config(
     try:
         # Safely evaluate the tags expression
         formatted_metadata['tags'] = eval(query_tags_template.format(**variables))
-    except:
+    except:  # noqa: E722  # Phase 3: replace with named exception
         # Fallback to just base tags if evaluation fails
         formatted_metadata['tags'] = formatted_base_tags
     

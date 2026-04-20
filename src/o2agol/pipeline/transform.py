@@ -20,6 +20,7 @@ from shapely.geometry import MultiPolygon
 from shapely.geometry.base import BaseGeometry
 
 from ..domain.models import Country, Query
+from ..utils import StageTimer
 
 # Constants for AGOL compatibility
 AGOL_STRING_MAX = 255  # safe default for text fields
@@ -127,26 +128,24 @@ class Transformer:
     def normalize(self, df: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """
         Apply field mapping, geometry normalization, and stable ID retention.
-        
+
         Args:
             df: Raw GeoDataFrame from data source
-            
+
         Returns:
             Normalized GeoDataFrame ready for publishing/export
         """
         if df.empty:
             logging.warning("Empty GeoDataFrame provided for transformation")
             return df
-            
-        # Determine layer type from query name for schema normalization
+
         layer_type = self._get_layer_type()
-        
-        logging.info(f"Normalizing schema for {layer_type} ({len(df):,} features)")
-        
-        # Apply the full schema normalization pipeline
-        normalized_gdf = normalize_schema(df, layer_type)
-        
-        logging.info(f"Schema normalization completed: {len(normalized_gdf):,} features processed")
+
+        with StageTimer("transform.normalize", layer_type=layer_type,
+                        in_count=len(df)) as t:
+            normalized_gdf = normalize_schema(df, layer_type)
+            t.add(out_count=len(normalized_gdf))
+
         return normalized_gdf
         
     def add_metadata(self, df: gpd.GeoDataFrame, country: Country) -> gpd.GeoDataFrame:
@@ -350,7 +349,9 @@ def normalize_schema(
     that AGOL can natively handle. This eliminates serialization issues with numpy arrays
     and nested dictionaries.
     """
-    if gdf.crs is None or gdf.crs.to_epsg() != 4326:
+    if gdf.crs is None:
+        gdf = gdf.set_crs(4326)
+    elif gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(4326)
 
     # Apply field name sanitization first
@@ -378,6 +379,7 @@ def normalize_schema(
 
     # Final data type cleanup
     result_gdf = _finalize_data_types(result_gdf)
+    result_gdf = _finalize_geometry_for_publish(result_gdf)
     
     return result_gdf
 
@@ -790,4 +792,37 @@ def _finalize_data_types(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
             result_gdf[col] = result_gdf[col].replace('None', None)
             result_gdf[col] = result_gdf[col].replace('nan', None)
     
+    return result_gdf
+
+
+def _finalize_geometry_for_publish(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Apply final geometry cleanup shared by all normalized layers."""
+    result_gdf = gdf.copy()
+
+    geom_col = getattr(result_gdf, "_geometry_column_name", None)
+    if not geom_col or geom_col not in result_gdf.columns:
+        candidates = [
+            c for c in result_gdf.columns if c.lower() in ("geometry", "geom", "the_geom", "shape")
+        ]
+        if not candidates:
+            raise ValueError("No geometry column found after schema normalization.")
+        result_gdf = result_gdf.set_geometry(candidates[0])
+
+    if result_gdf.geometry.name != "geometry":
+        try:
+            result_gdf = result_gdf.rename_geometry("geometry")
+        except Exception:
+            result_gdf = result_gdf.set_geometry(result_gdf.geometry.name)
+
+    result_gdf = result_gdf[result_gdf.geometry.notna() & ~result_gdf.geometry.is_empty].copy()
+
+    if result_gdf.crs is None:
+        result_gdf = result_gdf.set_crs(4326)
+    else:
+        try:
+            if result_gdf.crs.to_epsg() != 4326:
+                result_gdf = result_gdf.to_crs(4326)
+        except Exception:
+            result_gdf = result_gdf.to_crs(4326)
+
     return result_gdf

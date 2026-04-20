@@ -18,6 +18,7 @@ import fiona
 import geopandas as gpd
 
 from ..domain.enums import ExportFormat
+from ..utils import StageTimer
 
 logger = logging.getLogger(__name__)
 
@@ -92,16 +93,18 @@ class Exporter:
             extension = extensions.get(self.fmt, "geojson")
             output_path = out_dir / f"{base_name}.{extension}"
         
-        # Call the main export function
-        self.export_data(
-            data=data,
-            output_path=str(output_path),
-            target_name=base_name.split('_')[-1] if '_' in base_name else base_name,  # Extract target from base_name
-            export_format=self.fmt.value,
-            raw_export=raw,
-            include_metadata=True
-        )
-        
+        feature_count = sum(len(v) for v in data.values()) if isinstance(data, dict) else len(data)
+        with StageTimer("export.write", format=self.fmt.value,
+                        output=str(output_path), features=feature_count):
+            self.export_data(
+                data=data,
+                output_path=str(output_path),
+                target_name=base_name.split('_')[-1] if '_' in base_name else base_name,
+                export_format=self.fmt.value,
+                raw_export=raw,
+                include_metadata=True,
+            )
+
         return output_path
         
     def export_data(
@@ -192,10 +195,10 @@ class Exporter:
             Caller is responsible for cleanup of temporary file
         """
         # Create temp file in PID-isolated directory and close handle to avoid Windows file locking
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False, 
-                                         dir=str(temp_dir), encoding="utf-8")
-        tmp_name = tmp.name
-        tmp.close()  # Close handle before GeoPandas writes to avoid file locking on Windows
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".geojson", delete=False,
+                                        dir=str(temp_dir), encoding="utf-8") as tmp:
+            tmp_name = tmp.name
+        # Handle is closed on context-manager exit before GeoPandas writes (Windows file locking)
         
         # Use GeoPandas built-in GeoJSON export - handles all data types correctly
         gdf.to_file(tmp_name, driver='GeoJSON')
@@ -236,9 +239,8 @@ class Exporter:
     def _gdf_to_gpkg_tempfile(self, gdf: gpd.GeoDataFrame, layer_name: str, temp_dir: Path):
         """Write GeoDataFrame to a temporary GeoPackage with a single layer.
         Returns an object with a .name pointing to the .gpkg path."""
-        tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".gpkg", delete=False, dir=str(temp_dir))
-        tmp_name = tmp.name
-        tmp.close()
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".gpkg", delete=False, dir=str(temp_dir)) as tmp:
+            tmp_name = tmp.name
 
         # Ensure CRS is EPSG:4326 (if your pipeline guarantees it already, skip)
         if gdf.crs is not None and str(gdf.crs).lower() not in ("epsg:4326", "wgs84"):
