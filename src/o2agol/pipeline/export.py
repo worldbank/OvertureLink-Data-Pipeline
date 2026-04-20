@@ -14,8 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import fiona
 import geopandas as gpd
+import pyogrio
 
 from ..domain.enums import ExportFormat
 from ..utils import StageTimer
@@ -362,8 +362,9 @@ class Exporter:
     ) -> None:
         """Export to ESRI File Geodatabase format"""
         
-        # Validate FGDB driver availability
-        if 'OpenFileGDB' not in fiona.supported_drivers:
+        # Check the installed GDAL driver set through pyogrio, which is a
+        # declared dependency and the default write engine in our CI env.
+        if "OpenFileGDB" not in pyogrio.list_drivers(write=True):
             raise RuntimeError("OpenFileGDB driver not available. Please install GDAL with OpenFileGDB support.")
         
         # Create .gdb directory structure (remove if exists)
