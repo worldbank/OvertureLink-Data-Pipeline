@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import os
 import shutil
@@ -11,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from .utils import get_project_temp_dir, get_pid_temp_dir
+from .utils import get_pid_temp_dir, get_project_temp_dir  # noqa: F401  (re-export for source.py)
 
 
 def is_directory_tree_empty(directory: Path) -> bool:
@@ -25,10 +26,7 @@ def is_directory_tree_empty(directory: Path) -> bool:
         True if directory tree contains no files, False otherwise
     """
     try:
-        for item in directory.rglob("*"):
-            if item.is_file():
-                return False
-        return True
+        return all(not item.is_file() for item in directory.rglob("*"))
     except (OSError, PermissionError):
         # If we can't access the directory, assume it's not empty for safety
         return False
@@ -93,10 +91,8 @@ def get_temp_dir_size() -> int:
     total_size = 0
     for item in temp_dir.rglob("*"):
         if item.is_file():
-            try:
+            with contextlib.suppress(OSError, PermissionError):
                 total_size += item.stat().st_size
-            except (OSError, PermissionError):
-                pass
                 
     return total_size
 
@@ -163,10 +159,8 @@ def cleanup_current_pid() -> None:
 
     # Remove any empty directories, then the pid dir itself
     for subdir in sorted([p for p in pid_dir.rglob("*") if p.is_dir()], reverse=True):
-        try:
+        with contextlib.suppress(OSError):
             subdir.rmdir()
-        except OSError:
-            pass
 
     if not _remove_path_with_retries(pid_dir, retries=3, delay_s=1.0):
         logging.warning(f"Could not clean PID temp directory {pid_dir}: file(s) still in use")

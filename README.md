@@ -62,10 +62,8 @@ On macOS/Linux:
 - Optional: set `AGOL_PROFILE=your_profile` to cache the session and avoid repeated prompts in batch runs.
 - If you were previously using username/password and still get prompted each run, keep the same
   `AGOL_PROFILE` and run once; the pipeline now resets stale credential-based profiles to OAuth.
-- If `AGOL_CLIENT_SECRET` is set, the pipeline uses non-interactive OAuth and ignores `AGOL_PROFILE`.
-- For non-interactive OAuth, set `AGOL_CONTENT_OWNER` to force owner-scoped discovery/publishing.
-- Non-interactive OAuth cannot create new hosted services; use `agol.item_id` to update an existing
-  service, or run initial creation once with interactive OAuth/profile auth.
+- `AGOL_CLIENT_SECRET` can still be present in `.env`, but `AGOL_AUTH_METHOD=oauth`
+  publishes with a user-backed OAuth/profile session, not an app-only token.
 
 **Username/Password (Non‑2FA or Service Accounts)**
 - Set `AGOL_USERNAME` and `AGOL_PASSWORD` as shown in `.env.example`.

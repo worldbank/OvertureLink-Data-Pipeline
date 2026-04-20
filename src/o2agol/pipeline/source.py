@@ -19,8 +19,10 @@ import geopandas as gpd
 import pandas as pd
 
 from ..cleanup import get_pid_temp_dir
+from ..config.countries import CountryRegistry
 from ..domain.enums import ClipStrategy
 from ..domain.models import Country, Query, RunOptions
+from ..utils import StageTimer, log_stage
 
 # Column definitions for each Overture schema type
 # Users can easily add/remove columns here to customize data export
@@ -67,7 +69,6 @@ OVERTURE_COLUMNS = {
         'geometry'
     ]
 }
-from ..config.countries import CountryRegistry
 
 
 def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame:
@@ -781,8 +782,11 @@ class OvertureSource:
         Returns:
             GeoDataFrame for single-layer queries, or Dict of GeoDataFrames for multi-layer queries
         """
+        log_stage("source.read.start", theme=query.theme, type=query.type,
+                 country=country.iso2, clip=clip.value)
+
         # Implement cache->dump->S3 fallback logic
-        
+
         # Split mixed-geometry layers before dual-theme handling
         if getattr(query, "geometry_split", False):
             logging.info("Geometry split enabled: separating points, lines, and polygons")
@@ -922,11 +926,13 @@ class OvertureSource:
                     json.dump(metadata, f, indent=2)
                 
                 logging.info(f"Cached {len(gdf):,} features to {cache_file}")
-                
+
             except Exception as e:
                 logging.warning(f"Failed to cache S3 result: {e}")
                 # Continue execution even if caching fails
-        
+
+        log_stage("source.read.complete", out_count=len(gdf),
+                  source="s3" if not self._use_local_dumps else "dump_or_s3")
         return gdf
     
     def _read_multilayer_with_fallback(self, query: Query, country: Country, clip: ClipStrategy) -> dict[str, gpd.GeoDataFrame]:
@@ -940,12 +946,8 @@ class OvertureSource:
         
         for theme, type_name in zip(themes, types, strict=False):
             # Create a single-layer query for each theme with appropriate filter
-            if theme == 'buildings':
-                # Use building_filter for buildings (e.g., "subtype = 'education'")
-                filter_to_use = query.building_filter
-            else:
-                # Use main filter for places (e.g., "categories.primary = 'education'")
-                filter_to_use = query.filter
+            # Use building_filter for buildings, main filter for places
+            filter_to_use = query.building_filter if theme == 'buildings' else query.filter
                 
             single_query = Query(
                 theme=theme,
@@ -1032,28 +1034,29 @@ class OvertureSource:
     def _execute_single_query_with_retry(self, query: Query, country: Country, clip: ClipStrategy, attempt: int) -> gpd.GeoDataFrame:
         """Execute a single query with error handling and fallback logic."""
         con = self._get_connection()
-        
+
         try:
-            # Determine effective clipping strategy  
+            # Determine effective clipping strategy
             effective_clip = ClipStrategy.BBOX if self.run.use_bbox else clip
-            
+
             if effective_clip == ClipStrategy.DIVISIONS:
                 logging.info("Using Overture Divisions for precise country boundaries")
             else:
                 logging.info(f"Using bbox filtering for {country.iso2}")
-            
+
             # Use unified spatial query builder
             sql = self._build_spatial_query(query, country, effective_clip, self.run.limit)
-            
+
             logging.info("Executing optimized query with two-step processing...")
             logging.info(f"SQL preview: {sql[:200]}...")
-            start_time = time.time()
-            
-            # Use optimized two-step processing (recommended by Overture docs)
-            gdf = self._fetch_via_temp_file(con, sql)
-            
-            elapsed = time.time() - start_time
-            logging.info(f"Fetched {len(gdf):,} features in {elapsed:.1f} seconds")
+
+            # Sub-stage timer: the actual DuckDB query against Overture parquet.
+            # This is the single biggest wall-clock cost for schema/query bottleneck.
+            with StageTimer("source.query_s3", attempt=attempt,
+                            clip=effective_clip.value) as t:
+                gdf = self._fetch_via_temp_file(con, sql)
+                t.add(rows_returned=len(gdf))
+
             return gdf
             
         except Exception as e:
@@ -1498,8 +1501,6 @@ class OvertureSource:
             country_data = CountryRegistry.get_country(query.country)
             if not country_data:
                 raise ValueError(f"Unknown country: {query.country}")
-            country_iso2 = country_data.iso2
-            selector = {'iso2': country_iso2}
             
             # Create domain objects for the new _build_spatial_query method
             domain_query = Query(

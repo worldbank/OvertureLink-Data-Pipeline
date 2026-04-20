@@ -10,8 +10,8 @@ from multiple sources:
 Returns unified configuration objects for use in CLI commands.
 """
 
-from datetime import datetime
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +47,7 @@ def _normalize_groups(groups: Any) -> list[str]:
         return []
     if isinstance(groups, str):
         candidates: list[Any] = [groups]
-    elif isinstance(groups, (list, tuple, set)):
+    elif isinstance(groups, list | tuple | set):
         candidates = list(groups)
     else:
         return []
@@ -321,8 +321,8 @@ def format_metadata_from_config(
     variables["overture_notes"] = (
         "<b>About Overture Maps:</b> Overture Maps Foundation publishes open, global geospatial data "
         "organized into themes with consistent schemas for cross‑country analysis.<br>"
-        "<b>Schema:</b> This dataset uses the Overture <b>{theme}</b> theme and <b>{type}</b> layer schema.<br>"
-    ).format(theme=query_config.theme, type=query_config.type)
+        f"<b>Schema:</b> This dataset uses the Overture <b>{query_config.theme}</b> theme and <b>{query_config.type}</b> layer schema.<br>"
+    )
 
     # Layer notes (sectoral = three layers; others = single layer)
     if getattr(query_config, "is_multilayer", False) and query_config.name in ("education", "health", "markets"):
@@ -338,9 +338,9 @@ def format_metadata_from_config(
         variables["layer_notes"] = (
             "<b>Layers:</b><br>"
             "<ul>"
-            "<li><b>{layer_name}</b>: Features from Overture {theme}/{type}.</li>"
+            f"<li><b>{query_config.name}</b>: Features from Overture {query_config.theme}/{query_config.type}.</li>"
             "</ul><br>"
-        ).format(layer_name=query_config.name, theme=query_config.theme, type=query_config.type)
+        )
     
     # Format templates with variables
     formatted_metadata = {}
@@ -378,7 +378,7 @@ def format_metadata_from_config(
     try:
         # Safely evaluate the tags expression
         formatted_metadata['tags'] = eval(query_tags_template.format(**variables))
-    except:
+    except:  # noqa: E722  # Phase 3: replace with named exception
         # Fallback to just base tags if evaluation fails
         formatted_metadata['tags'] = formatted_base_tags
     

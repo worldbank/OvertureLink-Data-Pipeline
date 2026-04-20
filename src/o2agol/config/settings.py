@@ -13,7 +13,7 @@ Environment Variables (AGOL_ standard):
     AGOL_USERNAME: Username for ArcGIS Online (credentials auth)
     AGOL_PASSWORD: Password for ArcGIS Online (credentials auth)
     AGOL_CLIENT_ID: OAuth client ID (oauth auth)
-    AGOL_CLIENT_SECRET: Optional OAuth client secret (oauth auth, non-interactive)
+    AGOL_CLIENT_SECRET: Optional app secret retained for compatibility/debugging
     AGOL_PROFILE: Optional profile name to persist auth locally (interactive auth)
     AGOL_USE_OAUTH: Legacy flag, still supported for backward compatibility
     AGOL_TOKEN_EXPIRATION: Token expiration in minutes (default: 9999 for large datasets)
@@ -137,9 +137,9 @@ class AGOLCredentials:
         credentials - Username/password login (no 2FA)
         oauth       - Browser-based OAuth 2.0 login (supports 2FA, requires client_id)
 
-    When both client_id and client_secret are set, the pipeline uses the
-    server-to-server OAuth 2.0 client credentials flow — fully non-interactive,
-    no browser, no 2FA prompt. Suitable for automated batch runs.
+    For this pipeline, AGOL_AUTH_METHOD=oauth always means user OAuth so
+    hosted content operations run with a user principal. AGOL_CLIENT_SECRET is
+    retained for compatibility, but does not replace the browser/profile flow.
     """
     portal_url: str
     auth_method: str = "credentials"  # credentials | oauth
@@ -147,7 +147,7 @@ class AGOLCredentials:
     password: str = ""
     api_key: str = ""
     client_id: str = ""  # Required for oauth auth_method
-    client_secret: str = ""  # Optional: enables server-to-server OAuth (no 2FA)
+    client_secret: str = ""  # Optional compatibility field; oauth still uses user flow
     profile: str = ""  # Optional: cache session across runs
     token_expiration: int = 9999  # Extended default for large datasets
     large_dataset_threshold: int = 10000  # Feature count threshold
@@ -407,8 +407,8 @@ class Config:
                 large_dataset_threshold=large_dataset_threshold
             )
         except ValueError as e:
-            raise ConfigurationError(f"Invalid ArcGIS configuration: {e}")
-    
+            raise ConfigurationError(f"Invalid ArcGIS configuration: {e}") from e
+
     def _load_overture_config(self) -> None:
         """Load Overture Maps configuration with sensible defaults."""
         base_url = os.getenv("OVERTURE_BASE_URL", "s3://overturemaps-us-west-2/release")
@@ -427,7 +427,7 @@ class Config:
                 raise ConfigurationError(
                     f"Failed to resolve Overture release from catalog ({e}); "
                     "set OVERTURE_RELEASE to pin a specific release."
-                )
+                ) from e
 
         try:
             self.overture = OvertureConfig(
@@ -435,14 +435,14 @@ class Config:
                 release=release,
             )
         except ValueError as e:
-            raise ConfigurationError(f"Invalid Overture configuration: {e}")
-    
+            raise ConfigurationError(f"Invalid Overture configuration: {e}") from e
+
     def _load_processing_config(self) -> None:
         """Load DuckDB processing configuration."""
         memory_limit = os.getenv("DUCKDB_MEMORY_LIMIT", "8GB")
         threads = int(os.getenv("DUCKDB_THREADS", "8"))
         temp_dir = os.getenv("DUCKDB_TEMP_DIR")
-        
+
         try:
             self.processing = ProcessingConfig(
                 memory_limit=memory_limit,
@@ -450,14 +450,14 @@ class Config:
                 temp_dir=temp_dir
             )
         except ValueError as e:
-            raise ConfigurationError(f"Invalid processing configuration: {e}")
-    
+            raise ConfigurationError(f"Invalid processing configuration: {e}") from e
+
     def _load_temp_config(self) -> None:
         """Load temporary file management configuration."""
         retention_hours = int(os.getenv("TEMP_RETENTION_HOURS", "24"))
         warning_gb = int(os.getenv("TEMP_SIZE_WARNING_GB", "10"))
         limit_gb = int(os.getenv("TEMP_SIZE_LIMIT_GB", "20"))
-        
+
         try:
             self.temp = TempConfig(
                 retention_hours=retention_hours,
@@ -465,8 +465,8 @@ class Config:
                 limit_gb=limit_gb
             )
         except ValueError as e:
-            raise ConfigurationError(f"Invalid temp management configuration: {e}")
-    
+            raise ConfigurationError(f"Invalid temp management configuration: {e}") from e
+
     def _load_dump_config(self) -> None:
         """Load local dump configuration."""
         base_path = os.getenv("OVERTURE_DUMP_PATH", "./overturedump")
@@ -475,7 +475,7 @@ class Config:
         enable_spatial_index = os.getenv("DUMP_ENABLE_SPATIAL_INDEX", "true").lower() == "true"
         compression = os.getenv("DUMP_COMPRESSION", "zstd")
         partitioning = os.getenv("DUMP_PARTITIONING", "hive")
-        
+
         try:
             self.dump = DumpConfig(
                 base_path=base_path,
@@ -486,7 +486,7 @@ class Config:
                 partitioning=partitioning
             )
         except ValueError as e:
-            raise ConfigurationError(f"Invalid dump configuration: {e}")
+            raise ConfigurationError(f"Invalid dump configuration: {e}") from e
     
     def create_gis_connection(self, expiration: Optional[int] = None) -> GIS:
         """
@@ -495,7 +495,6 @@ class Config:
 
         Supported authentication modes:
         - OAuth browser login (2FA): AGOL_AUTH_METHOD=oauth + AGOL_CLIENT_ID (+ optional AGOL_PROFILE)
-        - OAuth client credentials (non-interactive): AGOL_AUTH_METHOD=oauth + AGOL_CLIENT_ID + AGOL_CLIENT_SECRET
         - Username/password: AGOL_AUTH_METHOD=credentials + AGOL_USERNAME + AGOL_PASSWORD
         - API key: AGOL_API_KEY
 
@@ -525,17 +524,13 @@ class Config:
                     raise RuntimeError("Existing AGOL connection has no user principal; rebuilding from profile.")
                 Config._pipeline_logger.debug("Reusing existing AGOL connection", "config.settings")
                 return Config._gis_connection
-            except:
+            except:  # noqa: E722  # Phase 3: replace with named exception
                 # Connection is no longer valid, create new one
                 Config._gis_connection = None
                 Config._connection_logged = False
 
         # Use provided expiration or fall back to configured default
         token_expiration = expiration if expiration is not None else self.agol.token_expiration
-        use_client_credentials = bool(
-            self.agol.auth_method == "oauth" and self.agol.client_secret
-        )
-
         try:
             # Try cached profile first to skip repeated logins.
             # This preserves existing behavior for long-running multi-country jobs.
@@ -564,10 +559,22 @@ class Config:
 
                 try:
                     gis = GIS(profile=self.agol.profile)
-                    Config._gis_connection = gis
                     user_info = gis.users.me
                     username = getattr(user_info, "username", None) if user_info else None
-                    org_name = getattr(gis.properties, "name", "ArcGIS")
+                    org_name = getattr(gis.properties, "name", None)
+
+                    # arcgis 2.4.x can return a GIS object from a stale or empty
+                    # profile without raising. If there is no user principal AND
+                    # no org name, the session has no real auth token. Reject it
+                    # and fall through to interactive OAuth so the user gets a
+                    # browser prompt instead of a silent 403 on publish.
+                    if not username and not org_name:
+                        raise RuntimeError(
+                            f"Profile '{self.agol.profile}' loaded but has no user "
+                            "principal or org. Treating as invalid."
+                        )
+
+                    Config._gis_connection = gis
                     if not Config._connection_logged:
                         if username:
                             Config._pipeline_logger.info(
@@ -591,39 +598,42 @@ class Config:
                         "config.settings"
                     )
 
+            gis = None
+            profile_name = self.agol.profile if self.agol is not None and self.agol.profile else None
             if self.agol.api_key:
                 gis = GIS(
                     url=self.agol.portal_url,
                     api_key=self.agol.api_key,
                 )
-            elif use_client_credentials:
-                # Server-to-server OAuth: client_id + client_secret, no browser, no 2FA.
-                Config._pipeline_logger.info(
-                    "Authenticating via OAuth client credentials (non-interactive)...",
-                    "config.settings"
-                )
-                gis = GIS(
-                    url=self.agol.portal_url,
-                    client_id=self.agol.client_id,
-                    client_secret=self.agol.client_secret,
-                )
-            elif self.agol.auth_method == "oauth":
+            elif self.agol.auth_method == "oauth" and self.agol.client_id:
                 Config._pipeline_logger.info(
                     "Opening browser for ArcGIS authentication...",
                     "config.settings"
                 )
+                # Match main-branch behavior: oauth always uses the user/browser
+                # flow and profile= persists the resulting token to the OS
+                # keyring. Without profile=, the browser opens every run.
+                #
+                # MEMORY.md documents a 2.4.x bug where profile= alongside
+                # client_id= can trigger a broken SAML path IF the profile has
+                # stale username/password credentials. The cleanup block above
+                # (lines 546-558) deletes any profile that has a username field,
+                # so by this point the profile is clean (url + client_id only)
+                # and the SAML bug does not trigger.
                 gis = GIS(
                     url=self.agol.portal_url,
                     client_id=self.agol.client_id,
-                    profile=self.agol.profile or None,
+                    profile=profile_name,
                 )
-            else:
+
+            # Username/password fallback (no OAuth, no API key).
+            if gis is None:
                 gis = GIS(
                     url=self.agol.portal_url,
                     username=self.agol.username,
                     password=self.agol.password,
                     expiration=token_expiration,
-                    profile=self.agol.profile or None,
+                    profile=profile_name,
                 )
 
             # Store connection and verify
@@ -650,12 +660,8 @@ class Config:
         except Exception as e:
             if self.agol.api_key:
                 auth_hint = "Please verify AGOL_API_KEY and portal URL."
-            elif use_client_credentials:
-                auth_hint = (
-                    "Please verify AGOL_CLIENT_ID, AGOL_CLIENT_SECRET, app privileges, and portal URL."
-                )
             elif self.agol.auth_method == "oauth":
-                auth_hint = "Please complete browser authentication and verify AGOL_CLIENT_ID/AGOL_PROFILE."
+                auth_hint = "Please verify AGOL_CLIENT_ID, AGOL_PROFILE, and portal URL."
             else:
                 auth_hint = "Please verify your credentials and portal URL."
             raise ConfigurationError(
@@ -723,11 +729,11 @@ class Config:
             self._ensure_agol_loaded()
 
         # Test ArcGIS connection.
-        # Skip browser-based OAuth (no client_secret) — validation happens at runtime.
-        # Server-to-server OAuth (client_id + client_secret) and credentials can be validated now.
+        # Skip OAuth validation at init time because it may require a browser to
+        # mint or refresh the user token for the configured profile.
         oauth_needs_browser = False
         if include_agol:
-            oauth_needs_browser = self.agol.auth_method == "oauth" and not self.agol.client_secret
+            oauth_needs_browser = self.agol.auth_method == "oauth"
         if include_agol and not oauth_needs_browser:
             try:
                 gis = self.create_gis_connection()

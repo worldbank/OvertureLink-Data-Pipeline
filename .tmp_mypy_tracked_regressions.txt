@@ -1,0 +1,2 @@
+src/o2agol/cli.py:0: note: (or run "mypy --install-types" to install all missing stub packages)
+src/o2agol/cli.py:0: note: See https://mypy.readthedocs.io/en/stable/running_mypy.html#missing-imports

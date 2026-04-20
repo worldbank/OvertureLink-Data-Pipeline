@@ -36,14 +36,21 @@ temp/
 logs/
 *.geojson
 *.gpkg
-*.txt
+requirements*.txt
+mypy-baseline.txt
 .ruff_cache/
 overturedump/
+.pytest_cache/
 
 # Development, debugging and experimental features
 dev/
 tests/
-!tests/
-!tests/test_config_loader_sharing.py
-!tests/test_publish_sharing.py
 docs/
+src/o2agol/testing/
+databricks/
+
+# Temporary local hardening artifacts
+.pre-commit-config.yaml
+Makefile
+.github/dependabot.yml
+.github/workflows/canary.yml

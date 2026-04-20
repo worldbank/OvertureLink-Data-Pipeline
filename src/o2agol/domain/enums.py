@@ -4,10 +4,10 @@ Pipeline Enumerations
 Core enums for type safety and clear interface definitions across the pipeline.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class Mode(str, Enum):
+class Mode(StrEnum):
     """Publishing modes for AGOL feature layers."""
     AUTO = "auto"           # Smart detection: create new or truncate-append existing
     INITIAL = "initial"     # Force creation of new layer
@@ -15,13 +15,13 @@ class Mode(str, Enum):
     APPEND = "append"       # Add data to existing layer without clearing
 
 
-class ClipStrategy(str, Enum):
+class ClipStrategy(StrEnum):
     """Spatial clipping strategies for data extraction."""
     DIVISIONS = "divisions" # Use Overture Divisions for precise boundaries
     BBOX = "bbox"           # Fast bbox-only filtering for development/testing
 
 
-class TargetType(str, Enum):
+class TargetType(StrEnum):
     """Target data types available for processing."""
     ROADS = "roads"         # Transportation networks
     BUILDINGS = "buildings" # Building footprints
@@ -31,14 +31,14 @@ class TargetType(str, Enum):
     MARKETS = "markets"     # Retail facilities (multi-layer)
 
 
-class ExportFormat(str, Enum):
+class ExportFormat(StrEnum):
     """Export format options for data output."""
     GPKG = "gpkg"           # SQLite-based format with multi-layer support
     GEOJSON = "geojson"     # Standards-compliant JSON format
     FGDB = "fgdb"           # ESRI File Geodatabase format
 
 
-class StagingFormat(str, Enum):
+class StagingFormat(StrEnum):
     """Staging formats for batch processing."""
     GEOJSON = "geojson"     # GeoJSON staging files
     GPKG = "gpkg"           # GeoPackage staging files
