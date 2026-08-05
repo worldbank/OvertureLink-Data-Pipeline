@@ -413,20 +413,30 @@ class Config:
         """Load Overture Maps configuration with sensible defaults."""
         base_url = os.getenv("OVERTURE_BASE_URL", "s3://overturemaps-us-west-2/release")
 
-        # OVERTURE_RELEASE supports three modes:
-        #   - unset or "latest": resolve dynamically from the Overture STAC catalog
-        #   - explicit release (e.g. "2025-07-23.0"): pin for reproducible runs
-        release = os.getenv("OVERTURE_RELEASE")
-        if release and release.lower() != "latest":
-            logger.info(f"Using pinned Overture release from OVERTURE_RELEASE: {release}")
-        else:
-            try:
-                release = get_latest_overture_release()
-                logger.info(f"Resolved latest Overture release from catalog: {release}")
-            except Exception as e:
+        # Always resolve the latest Overture release from the STAC catalog. This
+        # pipeline runs on Overture's monthly cadence; honoring a pinned release
+        # from .env causes silent drift where a stale value still passes config
+        # validation but points at an S3 path that no longer exists.
+        # OVERTURE_RELEASE is honored only as an emergency fallback when the
+        # catalog itself is unreachable. For per-run pinning (reproducibility),
+        # pass --release on the CLI.
+        try:
+            release = get_latest_overture_release()
+            logger.info(f"Resolved latest Overture release from catalog: {release}")
+        except Exception as e:
+            fallback = os.getenv("OVERTURE_RELEASE")
+            if fallback and fallback.lower() != "latest":
+                logger.warning(
+                    f"Failed to resolve latest release from catalog ({e}); "
+                    f"falling back to OVERTURE_RELEASE={fallback}. "
+                    "Verify this release still exists on S3."
+                )
+                release = fallback
+            else:
                 raise ConfigurationError(
-                    f"Failed to resolve Overture release from catalog ({e}); "
-                    "set OVERTURE_RELEASE to pin a specific release."
+                    f"Failed to resolve Overture release from catalog ({e}). "
+                    "Set OVERTURE_RELEASE in .env as an emergency fallback, "
+                    "or pass --release on the CLI."
                 ) from e
 
         try:

@@ -889,8 +889,22 @@ class OvertureSource:
         if missing_cols:
             logging.warning(f"S3 query result missing expected columns {missing_cols}")
         
-        # Cache the result for future use (essential for overture-dump functionality)
-        if self._enable_cache and gdf is not None and len(gdf) > 0:
+        # Cache the result for future use (essential for overture-dump functionality).
+        #
+        # The cache key from _get_cache_file_path is scoped to release/country/sector
+        # only, so any entry written here is read back by later runs as the complete
+        # country extract. A narrowed result must therefore never be written: the SQL
+        # applies query.filter (line 456) and run.limit (line 1048), and query.filter
+        # is populated for sectoral queries, including the buildings half of a
+        # dual-theme query. Caching either would silently truncate every later run.
+        is_complete_extract = query.filter is None and self.run.limit is None
+        if self._enable_cache and gdf is not None and len(gdf) > 0 and not is_complete_extract:
+            logging.debug(
+                f"Not caching narrowed result for {country.iso2}/{query.theme}/{query.type} "
+                f"(filter={query.filter is not None}, limit={self.run.limit}); "
+                "cache holds complete extracts only"
+            )
+        elif self._enable_cache and gdf is not None and len(gdf) > 0:
             try:
                 logging.info(f"Caching S3 query result for future use: {country.iso2}/{query.theme}/{query.type}")
                 if configured_release is None:
@@ -901,8 +915,8 @@ class OvertureSource:
                     type_name=query.type,
                     release=configured_release,
                     use_divisions=clip == ClipStrategy.DIVISIONS,
-                    limit=None,  # Cache full data, not limited
-                    filters=None  # Cache full data, not filtered
+                    limit=None,  # Complete extract; guarded by is_complete_extract
+                    filters=None  # Complete extract; guarded by is_complete_extract
                 )
                 # Save to cache (create a copy to avoid modifying the original)
                 cache_file = self._get_cache_file_path(cache_query)

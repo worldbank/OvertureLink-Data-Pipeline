@@ -78,9 +78,6 @@ def fetch_data(
         run_options = RunOptions(
             limit=limit,
             use_bbox=not use_divisions,
-            verbose=True,
-            dry_run=False,
-            log_to_file=False
         )
         
         # Create source and fetch data
@@ -102,7 +99,7 @@ def publish_to_agol(
     mode: str,
     gis,
     staging_format: StagingFormat = StagingFormat.GPKG,
-    use_async: bool = False,
+    use_async: Optional[bool] = None,
 ) -> str:
     """
     Publish GeoDataFrame to ArcGIS Online using GeoPackage staging.
@@ -427,8 +424,8 @@ def process_target(
     log_to_file: bool = False,
     country: Optional[str] = None,
     skip_cleanup: bool = False,
-    format: StagingFormat = StagingFormat.GEOJSON,
-    use_async: bool = False,
+    format: StagingFormat = StagingFormat.GPKG,
+    use_async: Optional[bool] = None,
     use_analyze: bool = True,
 ):
     """
@@ -972,13 +969,14 @@ def arcgis_upload(
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
     country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
+    release: Annotated[Optional[str], typer.Option("--release", help="Pin a specific Overture release (default: latest from catalog)")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Validate configuration without publishing")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
     skip_cleanup: Annotated[bool, typer.Option("--skip-cleanup", help="Skip temp file cleanup for debugging")] = False,
-    format: Annotated[StagingFormat, typer.Option("--format", "--staging-format", help="Format for staging data during append operations (geojson, gpkg, fgdb)")] = StagingFormat.GEOJSON,
-    use_async: Annotated[bool, typer.Option("--async", help="Use asynchronous processing for large datasets")] = False,
+    format: Annotated[StagingFormat, typer.Option("--format", "--staging-format", help="Format for staging data during append operations (geojson, gpkg, fgdb)")] = StagingFormat.GPKG,
+    use_async: Annotated[Optional[bool], typer.Option("--async/--no-async", help="Use asynchronous processing for large datasets (default: USE_ASYNC_APPEND)")] = None,
     use_analyze: Annotated[bool, typer.Option("--use-analyze/--no-analyze", help="Enable AGOL analyze for optimal parameters")] = True,
 ):
     """
@@ -1040,7 +1038,13 @@ def arcgis_upload(
             country=country or iso2,  # Support both --country and legacy --iso2
             config_path=config
         )
-        
+
+        # --release pins the run for reproducibility; otherwise the release
+        # resolved from the STAC catalog is used.
+        if release:
+            config_dict.setdefault("overture", {})["release"] = release
+            logging.info(f"Pinned Overture release from --release: {release}")
+
         # Update run options with CLI parameters for arcgis-upload
         from .domain.models import RunOptions
         run_options = RunOptions(
@@ -1051,7 +1055,6 @@ def arcgis_upload(
         
         # Determine clipping strategy
         clip_strategy = ClipStrategy.BBOX if not use_divisions else ClipStrategy.DIVISIONS
-        
         if dry_run:
             logging.info(f"DRY RUN: Would process {query_config.name} for {country_config.name} ({country_config.iso3.lower()})")
             logging.info(f"Query theme: {query_config.theme}, Target: {query_config.type}")
@@ -1166,6 +1169,7 @@ def export_data_command(
     limit: Annotated[Optional[int], typer.Option("--limit", "-l", help="Feature limit for testing and development")] = None,
     iso2: Annotated[Optional[str], typer.Option("--iso2", help="ISO2 country code override (legacy)")] = None,
     country: Annotated[Optional[str], typer.Option("--country", help="Country code/name for global config (e.g., 'af', 'afg', 'Afghanistan')")] = None,
+    release: Annotated[Optional[str], typer.Option("--release", help="Pin a specific Overture release (default: latest from catalog)")] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable detailed logging output")] = False,
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     log_to_file: Annotated[bool, typer.Option("--log-to-file", help="Create timestamped log files")] = False,
@@ -1237,8 +1241,12 @@ def export_data_command(
             config_path=config,
             load_agol_config=False  # AGOL config not needed for export
         )
-        
-        
+
+        # --release pins the run for reproducibility; otherwise the release
+        # resolved from the STAC catalog is used.
+        if release:
+            config_dict.setdefault("overture", {})["release"] = release
+            logging.info(f"Pinned Overture release from --release: {release}")
 
         # Update run options with CLI parameters for export
         from .domain.models import RunOptions
@@ -1260,7 +1268,6 @@ def export_data_command(
         
         # Determine clipping strategy
         clip_strategy = ClipStrategy.BBOX if not use_divisions else ClipStrategy.DIVISIONS
-        
         # Use direct export approach (following Overture docs pattern)
         source = OvertureSource(config_dict, run_options)
         output_path_obj = Path(output_path)
@@ -1438,7 +1445,7 @@ def overture_dump(
     use_divisions: Annotated[bool, typer.Option("--use-divisions/--use-bbox", help="Use Overture Divisions for country boundaries")] = True,
     # Cache optimization flags
     use_world_bank: Annotated[bool, typer.Option("--world-bank/--overture-divisions", help="Use World Bank boundaries (default: enabled)")] = True,
-    use_async: Annotated[bool, typer.Option("--async", help="Use async append for large datasets")] = False,
+    use_async: Annotated[Optional[bool], typer.Option("--async/--no-async", help="Use async append for large datasets (default: USE_ASYNC_APPEND)")] = None,
     use_analyze: Annotated[bool, typer.Option("--analyze", help="Analyze uploaded data before append")] = False,
 ):
     """
@@ -1592,6 +1599,7 @@ def overture_dump(
         country=country,
         config_path=config
     )
+    config_dict.setdefault("overture", {})["release"] = release
     
     # Extract theme information
     theme = query_config.theme
@@ -1615,7 +1623,7 @@ def overture_dump(
     run_options.clip = ClipStrategy.DIVISIONS if use_divisions else ClipStrategy.BBOX
     run_options.limit = limit
     run_options.use_bbox = not use_divisions
-    
+
     # Initialize OvertureSource with dump and cache functionality
     source = OvertureSource(config_dict, run_options)
     
@@ -1736,16 +1744,19 @@ def overture_dump(
         from .domain.models import Query as DomainQuery
         
         # Resolve country
-        country_info = CountryRegistry.get_country(country)
-        if not country_info:
+        registry_country = CountryRegistry.get_country(country)
+        if not registry_country:
             raise ValueError(f"Unknown country: {country}")
+        bounds_raw = CountryRegistry.get_bounding_boxes().get(registry_country.iso2, (0, 0, 0, 0))
+        bounds_tuple = tuple(bounds_raw)
         
         # Create domain objects for the new pipeline
         domain_country = DomainCountry(
-            name=country_info.name,
-            iso2=country_info.iso2,
-            iso3=country_info.iso3,
-            bounds=CountryRegistry.get_bounding_boxes().get(country_info.iso2, (0, 0, 0, 0))
+            name=registry_country.name,
+            iso2=registry_country.iso2,
+            iso3=registry_country.iso3,
+            bounds=cast(tuple[float, float, float, float], bounds_tuple),
+            region=registry_country.region,
         )
         
         domain_query = DomainQuery(
@@ -1755,7 +1766,15 @@ def overture_dump(
             building_filter=building_filter,
             name=query,
             is_multilayer=query_config.is_multilayer,
-            geometry_split=getattr(query_config, "geometry_split", False)
+            geometry_split=getattr(query_config, "geometry_split", False),
+            category_filter=getattr(query_config, "category_filter", None),
+            original_config=getattr(query_config, "original_config", None),
+            sector_title=getattr(query_config, "sector_title", None),
+            sector_description=getattr(query_config, "sector_description", None),
+            sector_tag=getattr(query_config, "sector_tag", None),
+            data_type=getattr(query_config, "data_type", None),
+            tags=getattr(query_config, "tags", None),
+            upsert_key=getattr(query_config, "upsert_key", None),
         )
         
         # === PHASE 1: DATA ACQUISITION ===
@@ -1978,6 +1997,10 @@ def overture_dump(
                     )
                 else:
                     # Single layer export
+                    if output_path is None:
+                        raise ValueError(
+                            "Output path is required for single-layer export."
+                        )
                     exporter.write(
                         data=gdf_transformed,
                         base_name=Path(output_path).stem,
