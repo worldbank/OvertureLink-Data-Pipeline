@@ -48,6 +48,7 @@ tests/
 docs/
 src/o2agol/testing/
 databricks/
+CONTEXT.MD
 
 # Temporary local hardening artifacts
 .pre-commit-config.yaml
