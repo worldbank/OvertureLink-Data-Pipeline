@@ -140,32 +140,6 @@ class FeatureLayerManager:
         name = re.sub(r"[^a-z0-9_]", "", name)
         return name[:30]
 
-    def _rename_sublayers_to_layer_type(self, flc: FeatureLayerCollection) -> None:
-        """Name each sublayer after its layer type, at service creation.
-
-        ArcGIS Online names sublayers from the staged GeoPackage's fully-qualified
-        table reference, so a table 'roads' arrives as 'main.roads' -- 'main' being
-        SQLite's name for the primary attached database, which is never stored in the
-        file itself. Renaming to the sanitized name makes the stored name identical to
-        the key the append path derives, so sublayer matching becomes exact rather
-        than compensatory.
-
-        Naming is cosmetic. A failure here must not fail a publish that has already
-        written its data, so each sublayer is attempted independently.
-        """
-        for layer in flc.layers:
-            current = getattr(layer.properties, "name", "") or ""
-            if not current:
-                continue
-            canonical = self._sanitize_layer_name(current)
-            if canonical == current:
-                continue
-            try:
-                layer.manager.update_definition({"name": canonical})
-                logging.debug(f"Renamed sublayer '{current}' to '{canonical}'")
-            except Exception as e:
-                logging.warning(f"Could not rename sublayer '{current}' to '{canonical}': {e}")
-
     def _ensure_geodataframe_with_geometry(self, df: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """Guarantee GeoDataFrame with active geometry and EPSG:4326; drop empties."""
         if not isinstance(df, gpd.GeoDataFrame):
@@ -304,7 +278,6 @@ class FeatureLayerManager:
             try:
                 published = src_item.publish()
                 flc = FeatureLayerCollection.fromitem(published)
-                self._rename_sublayers_to_layer_type(flc)
                 return published, flc
             finally:
                 # Clean up the uploaded source GPKG item; the published HFL remains
