@@ -151,20 +151,30 @@ class FeatureLayerManager:
         than compensatory.
 
         Naming is cosmetic. A failure here must not fail a publish that has already
-        written its data, so each sublayer is attempted independently.
+        written its data, so every step is guarded: listing the sublayers and reading
+        each name are lazy network calls in the arcgis library, and an exception from
+        either would otherwise escape into a caller that has already created the
+        service, reporting failure for a service AGOL has in fact kept.
         """
-        for layer in flc.layers:
-            current = getattr(layer.properties, "name", "") or ""
-            if not current:
-                continue
-            canonical = self._sanitize_layer_name(current)
-            if canonical == current:
-                continue
+        try:
+            layers = list(flc.layers)
+        except Exception as e:
+            logging.warning(f"Could not list sublayers to rename: {e}")
+            return
+
+        for layer in layers:
+            current = ""
             try:
+                current = getattr(layer.properties, "name", "") or ""
+                if not current:
+                    continue
+                canonical = self._sanitize_layer_name(current)
+                if canonical == current:
+                    continue
                 layer.manager.update_definition({"name": canonical})
                 logging.debug(f"Renamed sublayer '{current}' to '{canonical}'")
             except Exception as e:
-                logging.warning(f"Could not rename sublayer '{current}' to '{canonical}': {e}")
+                logging.warning(f"Could not rename sublayer '{current or '<unreadable>'}': {e}")
 
     def _ensure_geodataframe_with_geometry(self, df: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """Guarantee GeoDataFrame with active geometry and EPSG:4326; drop empties."""
