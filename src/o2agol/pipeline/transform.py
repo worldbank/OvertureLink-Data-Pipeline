@@ -159,9 +159,6 @@ class Transformer:
         Returns:
             GeoDataFrame enriched with metadata
         """
-        if df.empty:
-            return df
-            
         result_df = df.copy()
         
         # Add processing metadata
