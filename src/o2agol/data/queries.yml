@@ -57,7 +57,7 @@ education:
   # Data Selection  
   theme: places
   type: place
-  filter: "categories.primary = 'education'"
+  filter: "taxonomy.hierarchy[1] = 'education'"
   building_filter: "subtype = 'education'"
   
   # Sector-specific Variables
@@ -82,7 +82,7 @@ health:
   # Data Selection
   theme: places
   type: place
-  filter: "categories.primary = 'health_and_medical'"
+  filter: "taxonomy.hierarchy[1] = 'health_care'"
   building_filter: "subtype = 'medical'"
   
   # Sector-specific Variables
@@ -107,7 +107,7 @@ markets:
   # Data Selection
   theme: places
   type: place
-  filter: "categories.primary IN ('retail', 'shopping', 'food_and_drink')"
+  filter: "taxonomy.hierarchy[1] IN ('shopping', 'food_and_drink')"
   building_filter: "subtype IN ('service', 'commercial')"
   
   # Sector-specific Variables

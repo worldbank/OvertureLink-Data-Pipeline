@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import logging
 import os
@@ -23,19 +24,77 @@ from typing import Any, Optional
 
 import geopandas as gpd
 from arcgis.features import FeatureLayerCollection
+from arcgis.gis import SharingLevel
 
 from ..domain.contracts import validate_publish_contracts
 from ..utils import StageTimer, log_stage
 
 # ----------------------------
-# Global knobs (env-tunable)
+# Global knobs (env-tunable, evaluated lazily)
 # ----------------------------
-BATCH_THRESHOLD  = int(os.environ.get("BatchThreshold", "200000"))   # noqa: SIM112  # switch to batching above this many records
-BATCH_SIZE       = int(os.environ.get("BatchSize", "500000"))        # noqa: SIM112  # starting part size per append job
-BATCH_MIN        = int(os.environ.get("BatchMin", "50000"))          # noqa: SIM112  # floor for adaptive halves
-SEED_SIZE        = int(os.environ.get("SeedSize", "2000"))           # noqa: SIM112  # small seed to establish schema
-APPEND_TIMEOUT_S = int(os.environ.get("AppendTimeout", "14400"))     # noqa: SIM112
-USE_ASYNC_APPEND = os.environ.get("USE_ASYNC_APPEND", "false").lower() == "true"  # Control async behavior
+# These are READ AT CALL TIME, not at module import. The CLI loads .env via
+# Config() AFTER this module is imported, so capturing values at import time
+# would miss any .env overrides and freeze whatever was in the parent shell
+# environment (or the hardcoded defaults). Functions ensure we always reflect
+# the currently-loaded environment.
+
+def _read_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
+
+
+def _read_bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _batch_threshold() -> int:
+    """Switch to batching above this many records."""
+    return _read_int_env("BatchThreshold", 100_000)
+
+
+def _batch_size() -> int:
+    """Starting part size per append job. AGOL community guidance:
+    50K-100K for complex geometries, larger for simple points."""
+    return _read_int_env("BatchSize", 100_000)
+
+
+def _batch_min() -> int:
+    """Floor for adaptive batch halving on payload/timeout errors."""
+    return _read_int_env("BatchMin", 50_000)
+
+
+def _seed_size() -> int:
+    """Small seed used to establish service schema before bulk append."""
+    return _read_int_env("SeedSize", 2_000)
+
+
+def _append_timeout_s() -> int:
+    """Hard timeout for any single append job (sync or async polled)."""
+    return _read_int_env("AppendTimeout", 14_400)
+
+
+def _use_async_append() -> bool:
+    """Async + polling avoids indefinite hangs on large appends."""
+    return _read_bool_env("USE_ASYNC_APPEND", True)
+
+
+# Backwards-compatible module-level names. Kept as snapshots so any external
+# importer still gets a sensible value, but internal code MUST call the
+# functions above so .env overrides are honored at runtime.
+BATCH_THRESHOLD  = _batch_threshold()
+BATCH_SIZE       = _batch_size()
+BATCH_MIN        = _batch_min()
+SEED_SIZE        = _seed_size()
+APPEND_TIMEOUT_S = _append_timeout_s()
+USE_ASYNC_APPEND = _use_async_append()
 
 
 # Logging defaults
@@ -65,7 +124,7 @@ class FeatureLayerManager:
         self.gis = gis
         self.mode = mode
         # CLI argument overrides environment variable
-        self.use_async = use_async if use_async is not None else USE_ASYNC_APPEND
+        self.use_async = use_async if use_async is not None else _use_async_append()
 
     # ----------------------------
     # Name + geometry helpers
@@ -80,6 +139,42 @@ class FeatureLayerManager:
         name = name.replace(".", "_").replace("-", "_").replace(" ", "_")
         name = re.sub(r"[^a-z0-9_]", "", name)
         return name[:30]
+
+    def _rename_sublayers_to_layer_type(self, flc: FeatureLayerCollection) -> None:
+        """Name each sublayer after its layer type, at service creation.
+
+        ArcGIS Online names sublayers from the staged GeoPackage's fully-qualified
+        table reference, so a table 'roads' arrives as 'main.roads' -- 'main' being
+        SQLite's name for the primary attached database, which is never stored in the
+        file itself. Renaming to the sanitized name makes the stored name identical to
+        the key the append path derives, so sublayer matching becomes exact rather
+        than compensatory.
+
+        Naming is cosmetic. A failure here must not fail a publish that has already
+        written its data, so every step is guarded: listing the sublayers and reading
+        each name are lazy network calls in the arcgis library, and an exception from
+        either would otherwise escape into a caller that has already created the
+        service, reporting failure for a service AGOL has in fact kept.
+        """
+        try:
+            layers = list(flc.layers)
+        except Exception as e:
+            logging.warning(f"Could not list sublayers to rename: {e}")
+            return
+
+        for layer in layers:
+            current = ""
+            try:
+                current = getattr(layer.properties, "name", "") or ""
+                if not current:
+                    continue
+                canonical = self._sanitize_layer_name(current)
+                if canonical == current:
+                    continue
+                layer.manager.update_definition({"name": canonical})
+                logging.debug(f"Renamed sublayer '{current}' to '{canonical}'")
+            except Exception as e:
+                logging.warning(f"Could not rename sublayer '{current or '<unreadable>'}': {e}")
 
     def _ensure_geodataframe_with_geometry(self, df: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """Guarantee GeoDataFrame with active geometry and EPSG:4326; drop empties."""
@@ -161,7 +256,7 @@ class FeatureLayerManager:
                 gdf = self._ensure_geodataframe_with_geometry(gdf)
                 if len(gdf) == 0:
                     continue
-                seed = gdf.iloc[: max(1, min(SEED_SIZE, len(gdf)))].copy()
+                seed = gdf.iloc[: max(1, min(_seed_size(), len(gdf)))].copy()
                 # Write/append layer table into the same GPKG
                 seed.to_file(gpkg_path, layer=_safe(raw_name), driver="GPKG")
                 wrote_any = True
@@ -219,6 +314,7 @@ class FeatureLayerManager:
             try:
                 published = src_item.publish()
                 flc = FeatureLayerCollection.fromitem(published)
+                self._rename_sublayers_to_layer_type(flc)
                 return published, flc
             finally:
                 # Clean up the uploaded source GPKG item; the published HFL remains
@@ -302,12 +398,15 @@ class FeatureLayerManager:
         return str(getattr(group_entry, "id", "")).strip()
 
     def _share_item_with_group(self, item: Any, group_id: str) -> bool:
-        """Share an item to a single group using the public ArcGIS Item API."""
-        result = item.share(groups=[group_id])
-        if isinstance(result, Mapping):
-            not_shared = result.get("notSharedWith") or []
-            return group_id not in {self._extract_group_id(entry) for entry in not_shared}
-        return True
+        """Share an item to a single group using the modern Item.sharing API.
+
+        The deprecated Item.share() method (removed in arcgis 3.0.0) has
+        unreliable notSharedWith semantics in 2.3+. Item.sharing.groups.add()
+        re-verifies the share by re-listing the item's groups after the
+        request and raises with the real API error if the request was
+        rejected.
+        """
+        return bool(item.sharing.groups.add(group_id))
 
     def _get_current_item_sharing(self, item) -> tuple[str, set[str]]:
         """
@@ -346,6 +445,17 @@ class FeatureLayerManager:
 
         sharing_cfg = metadata.get("sharing")
         if not isinstance(sharing_cfg, dict):
+            # No sharing block reached this run, so group membership and visibility
+            # are left untouched. This is the silent failure operators hit when the
+            # active config has no populated 'sharing:' section: the publish
+            # succeeds and the item silently keeps its previous access, which for a
+            # newly created service is private with no groups. Warn so this is
+            # distinguishable from sharing that ran and had nothing to change.
+            logger.warning(
+                "No sharing configuration resolved; group membership and visibility "
+                "left unchanged. Pass a config with a populated 'sharing:' section "
+                "(the packaged agol_metadata.yml has it commented out)."
+            )
             return
 
         policy = str(sharing_cfg.get("policy", "additive")).strip().lower() or "additive"
@@ -411,12 +521,12 @@ class FeatureLayerManager:
 
         if needs_visibility_upgrade or groups_to_share:
             try:
-                # Set visibility first (everyone/org flags)
+                # Set visibility first via the modern sharing manager.
                 if needs_visibility_upgrade:
-                    item.share(
-                        everyone=(effective_visibility == "public"),
-                        org=(effective_visibility in ("org", "public")),
-                    )
+                    if effective_visibility == "public":
+                        item.sharing.sharing_level = SharingLevel.EVERYONE
+                    elif effective_visibility == "org":
+                        item.sharing.sharing_level = SharingLevel.ORG
 
                 # Share to each group individually using the public Item.share API
                 for gid, group_obj in groups_to_share_objs.items():
@@ -475,31 +585,69 @@ class FeatureLayerManager:
         t_fields = [f["name"] for f in feature_layer.properties.fields]
         return [c for c in source_cols if c in t_fields and c not in reserved]
 
+    def _call_append_with_timeout(self, feature_layer, timeout_s: int, **kwargs):
+        """Run feature_layer.append(future=False) with a hard client-side timeout.
+
+        feature_layer.append(future=False) blocks until the AGOL server returns;
+        AGOL's append API can stall server-side on large payloads and never
+        return, hanging the Python process indefinitely. This wrapper enforces
+        a ceiling so the existing adaptive-batch retry can halve the batch and
+        try again instead of hanging.
+
+        The executor is NOT used as a context manager: Executor.__exit__ calls
+        shutdown(wait=True), which blocks until the stalled append returns and
+        so defeats the timeout entirely. Shutting down with wait=False leaks the
+        worker thread until the HTTP call eventually returns, which is strictly
+        better than hanging the pipeline.
+        """
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            fut = ex.submit(feature_layer.append, **kwargs)
+            try:
+                return fut.result(timeout=timeout_s)
+            except concurrent.futures.TimeoutError as e:
+                fut.cancel()  # best-effort; the underlying HTTP call may not honor cancellation
+                raise RuntimeError(
+                    f"Sync append timed out after {timeout_s}s "
+                    "(stuck on AGOL server-side append)"
+                ) from e
+        finally:
+            ex.shutdown(wait=False)
+
     def _poll_append_job(self, job, timeout_s: int) -> dict:
+        """Poll an async append future until completion, with heartbeat logging.
+
+        feature_layer.append(future=True) returns a stdlib concurrent.futures.Future.
+        A terminal failure surfaces via .result() raising; status checks via
+        .done() can transiently fail and are retried. A heartbeat line every 30s
+        gives operators the signal needed to distinguish "running" from "hung".
+        """
         start = time.time()
+        last_heartbeat = start
         while True:
-            # Check if job has completed
-            if hasattr(job, "done"):
-                try:
-                    if job.done():
-                        return job.result() or {"success": True}
-                except Exception as e:
-                    logger.debug(f"Error checking job status: {e}")
-                    # If we can't check status, wait a bit and retry
-                    time.sleep(2)
-                    continue
-            
-            # For synchronous jobs or jobs without done() method
-            if hasattr(job, "status"):
-                if job.status in ["completed", "succeeded", "CompletedSuccessfully"]:
-                    return {"success": True}
-                elif job.status in ["failed", "CompletedWithErrors"]:
-                    raise RuntimeError(f"Append job failed with status: {job.status}")
-            
-            # Check timeout
-            if time.time() - start > timeout_s:
+            elapsed = time.time() - start
+            if elapsed > timeout_s:
                 raise RuntimeError(f"Append job timed out after {timeout_s}s")
-            
+
+            try:
+                done = job.done()
+            except Exception as e:
+                logger.debug(f"job.done() raised: {e}; retrying")
+                time.sleep(2)
+                continue
+
+            if done:
+                # Let .result() exceptions propagate. A terminal failure must
+                # reach the caller and the adaptive-batch retry, not be swallowed.
+                return job.result() or {"success": True}
+
+            if time.time() - last_heartbeat >= 30:
+                logger.info(
+                    f"Append job still running, elapsed={int(elapsed)}s "
+                    f"(timeout={timeout_s}s)"
+                )
+                last_heartbeat = time.time()
+
             time.sleep(2)
 
     def _append_via_item_hardened(
@@ -554,8 +702,8 @@ class FeatureLayerManager:
             actual_use_async = use_async if use_async is not None else self.use_async
             
             logger.info(f"Starting append operation with temp item {temp_item.id} ({len(gdf)} features)")
-            
-            job = feature_layer.append(
+
+            append_kwargs = dict(
                 item_id=temp_item.id,
                 upload_format=upload_format,
                 source_table_name=source_table_name,
@@ -566,18 +714,24 @@ class FeatureLayerManager:
                 update_geometry=True,
                 rollback=True,
                 return_messages=True,
-                future=actual_use_async
             )
 
+            timeout_s = _append_timeout_s()
             if actual_use_async:
-                logger.info(f"Async append started, polling for completion (timeout: {APPEND_TIMEOUT_S}s)")
+                job = feature_layer.append(future=True, **append_kwargs)
+                logger.info(f"Async append started, polling for completion (timeout: {timeout_s}s)")
                 try:
-                    self._poll_append_job(job, timeout_s=APPEND_TIMEOUT_S)
+                    self._poll_append_job(job, timeout_s=timeout_s)
                     logger.info("Append job completed successfully")
                 except Exception as e:
                     logger.error(f"Append job failed or timed out: {e}")
                     raise
             else:
+                # Sync path is wrapped with a hard client-side timeout so that
+                # a stalled AGOL server cannot hang the process indefinitely.
+                self._call_append_with_timeout(
+                    feature_layer, timeout_s, future=False, **append_kwargs
+                )
                 logger.info("Synchronous append completed")
 
             return True
@@ -632,8 +786,9 @@ class FeatureLayerManager:
             except Exception as e:
                 msg = str(e)
                 # adapt on payload/time errors
-                if any(s in msg for s in ("413", "Request Entity Too Large", "timed out", "504", "502")) and bs > BATCH_MIN:
-                    new_bs = max(BATCH_MIN, bs // 2)
+                batch_min = _batch_min()
+                if any(s in msg for s in ("413", "Request Entity Too Large", "timed out", "504", "502")) and bs > batch_min:
+                    new_bs = max(batch_min, bs // 2)
                     logger.warning(f"Append part failed: {msg[:160]}... reducing batch {bs:,}→{new_bs:,} and retrying the same window.")
                     bs = new_bs
                     time.sleep(1.0)
@@ -654,7 +809,7 @@ class FeatureLayerManager:
             logger.info("Nothing to publish (no features).")
             return
 
-        seed_count = min(SEED_SIZE, total)
+        seed_count = min(_seed_size(), total)
         seed = prepared_gdf.iloc[:seed_count].copy()
         rest = prepared_gdf.iloc[seed_count:].copy()
 
@@ -663,16 +818,34 @@ class FeatureLayerManager:
         self._append_via_item_hardened(feature_layer, seed, staging_format=fmt, use_async=self.use_async)
 
         if len(rest) > 0:
-            if len(rest) >= BATCH_THRESHOLD:
+            threshold = _batch_threshold()
+            if len(rest) >= threshold:
                 logger.info(f"Bulk appending remaining {len(rest):,} features in batches...")
-                self._append_via_batches(feature_layer, rest, batch_size=BATCH_SIZE, staging_format=fmt)
+                self._append_via_batches(feature_layer, rest, batch_size=_batch_size(), staging_format=fmt)
             else:
                 logger.info(f"Appending remaining {len(rest):,} features in a single job...")
                 self._append_via_item_hardened(feature_layer, rest, staging_format=fmt, use_async=self.use_async)
 
+    def _log_active_publish_settings(self, total_features: int) -> None:
+        """Log the env-resolved settings used for this publish operation.
+
+        Anchored at the start of every publish so the log shows what AGOL
+        knobs were ACTUALLY in effect, regardless of .env-load ordering.
+        """
+        logger.info(
+            "Publish settings: features=%d, batch_threshold=%d, batch_size=%d, "
+            "batch_min=%d, async=%s, append_timeout_s=%d",
+            total_features,
+            _batch_threshold(),
+            _batch_size(),
+            _batch_min(),
+            self.use_async,
+            _append_timeout_s(),
+        )
+
     def publish_or_update(
         self,
-        feature_layer,
+        feature_layer: Any,
         prepared_gdf: gpd.GeoDataFrame,
         mode: str = "auto",
         staging_format: Any | None = StagingFormat.GPKG
@@ -685,18 +858,22 @@ class FeatureLayerManager:
         """
         gdf = self._ensure_geodataframe_with_geometry(prepared_gdf)
         fmt = self._normalize_staging_format(staging_format)
+        self._log_active_publish_settings(len(gdf))
 
         m = (mode or self.mode or "auto").lower()
         if m == "initial":
             self._initial_with_seed_and_append(feature_layer, gdf, staging_format=fmt)
             return
 
+        threshold = _batch_threshold()
+        size = _batch_size()
+
         if m == "overwrite":
             logger.info("Truncating layer prior to append (overwrite mode)...")
             feature_layer.manager.truncate()
             # big vs small
-            if len(gdf) >= BATCH_THRESHOLD:
-                self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=fmt)
+            if len(gdf) >= threshold:
+                self._append_via_batches(feature_layer, gdf, batch_size=size, staging_format=fmt)
             else:
                 self._append_via_item_hardened(feature_layer, gdf, staging_format=fmt, use_async=self.use_async)
             return
@@ -704,9 +881,9 @@ class FeatureLayerManager:
         if m == "auto":
             logger.info("Truncating layer prior to append (auto mode on existing service)...")
             feature_layer.manager.truncate()
-            
-        if len(gdf) >= BATCH_THRESHOLD:
-            self._append_via_batches(feature_layer, gdf, batch_size=BATCH_SIZE, staging_format=fmt)
+
+        if len(gdf) >= threshold:
+            self._append_via_batches(feature_layer, gdf, batch_size=size, staging_format=fmt)
         else:
             self._append_via_item_hardened(feature_layer, gdf, staging_format=fmt, use_async=self.use_async)
 
@@ -887,27 +1064,37 @@ class FeatureLayerManager:
             for lyr in flc.layers
         }
 
-        # Iterate each sublayer and publish/update according to mode
-        for raw_name, gdf in layer_data_copy.items():
-            key = self._sanitize_layer_name(raw_name)
-            if key not in target_layers_by_name:
-                raise RuntimeError(
-                    f"Target sublayer '{raw_name}' not found. "
-                    f"Available (sanitized): {list(target_layers_by_name.keys())}"
-                )
-
-            target_layer = target_layers_by_name[key]
-            layer_mode = mode
-            if created_new_service:
-                layer_mode = "initial"
-            with StageTimer("publish.sublayer", layer=key, mode=layer_mode,
-                            features=len(gdf)):
-                self.publish_or_update(target_layer, gdf, mode=layer_mode, staging_format=normalized_staging_format)
-
+        # Iterate each sublayer and publish/update according to mode.
+        #
+        # Sharing is reconciled in the finally block because group membership and
+        # visibility are item-level settings, independent of the layer data. They
+        # must be applied even when a sublayer publish fails, or a service left in
+        # a partial state by an earlier run never receives its configured groups:
+        # the sublayer check below raises on every subsequent run, and sharing
+        # would be skipped as collateral damage of a data error.
         try:
-            self._apply_item_sharing(item, metadata or {})
-        except Exception as e:
-            logger.warning(f"Skipping item sharing update: {e}")
+            for raw_name, gdf in layer_data_copy.items():
+                key = self._sanitize_layer_name(raw_name)
+                if key not in target_layers_by_name:
+                    raise RuntimeError(
+                        f"Target sublayer '{raw_name}' not found. "
+                        f"Available (sanitized): {list(target_layers_by_name.keys())}. "
+                        "The existing service predates this query's layer set; "
+                        "delete the item or publish under a new service name."
+                    )
+
+                target_layer = target_layers_by_name[key]
+                layer_mode = mode
+                if created_new_service:
+                    layer_mode = "initial"
+                with StageTimer("publish.sublayer", layer=key, mode=layer_mode,
+                                features=len(gdf)):
+                    self.publish_or_update(target_layer, gdf, mode=layer_mode, staging_format=normalized_staging_format)
+        finally:
+            try:
+                self._apply_item_sharing(item, metadata or {})
+            except Exception as e:
+                logger.warning(f"Skipping item sharing update: {e}")
 
         try:
             self._ensure_extract_capability(flc)
@@ -918,7 +1105,7 @@ class FeatureLayerManager:
                   layers=len(layer_data_copy), total_features=total_features)
         return existing_id
     
-    def close(self):
+    def close(self) -> None:
         """Clean up GIS connection resources."""
         if hasattr(self, 'gis') and self.gis:
             try:

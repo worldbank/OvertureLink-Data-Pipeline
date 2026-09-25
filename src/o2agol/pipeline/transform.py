@@ -159,9 +159,6 @@ class Transformer:
         Returns:
             GeoDataFrame enriched with metadata
         """
-        if df.empty:
-            return df
-            
         result_df = df.copy()
         
         # Add processing metadata
@@ -534,9 +531,10 @@ def _normalize_places_schema(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         names_data = _flatten_names_field(gdf["names"])
         result_gdf = pd.concat([result_gdf, names_data], axis=1)
     
-    # Flatten categories field (places only)
-    if "categories" in gdf.columns:
-        categories_data = _flatten_categories_field(gdf["categories"])
+    # Flatten category field (places only); taxonomy supersedes categories from 2026-09
+    category_col = next((c for c in ("taxonomy", "categories") if c in gdf.columns), None)
+    if category_col:
+        categories_data = _flatten_categories_field(gdf[category_col])
         result_gdf = pd.concat([result_gdf, categories_data], axis=1)
     
     # Flatten addresses field (places only)  
@@ -595,9 +593,9 @@ def _flatten_names_field(names_series: pd.Series) -> pd.DataFrame:
 
 def _flatten_categories_field(categories_series: pd.Series) -> pd.DataFrame:
     """
-    Flatten Overture categories field into simple string columns.
-    
-    From: {"primary": "restaurant", "alternate": ["fast_food", "cafe"]}
+    Flatten Overture taxonomy (or legacy categories) field into simple string columns.
+
+    From: {"primary": "restaurant", "alternates": ["fast_food", "cafe"], ...}
     To: category_primary, category_alternate columns
     """
     result_data: dict[str, list[Optional[str]]] = {
@@ -673,9 +671,9 @@ def _extract_names_from_value(names_value: Any) -> tuple[Optional[str], Optional
 
 
 def _extract_categories_from_value(categories_value: Any) -> tuple[Optional[str], Optional[str]]:
-    """Extract primary and alternate categories from a categories value."""
+    """Extract primary and alternate categories from a taxonomy or legacy categories value."""
     try:
-        if not categories_value:
+        if categories_value is None or (isinstance(categories_value, str) and not categories_value):
             return None, None
             
         # Handle string JSON
@@ -685,8 +683,12 @@ def _extract_categories_from_value(categories_value: Any) -> tuple[Optional[str]
         # Handle dict
         if isinstance(categories_value, dict):
             primary = categories_value.get("primary")
-            alternate_list = categories_value.get("alternate", [])
-            alternate = alternate_list[0] if isinstance(alternate_list, list) and alternate_list else None
+            # taxonomy uses 'alternates'; legacy categories used 'alternate'
+            alternate_list = categories_value.get("alternates")
+            if alternate_list is None:
+                alternate_list = categories_value.get("alternate")
+            alternate_list = [] if alternate_list is None else list(alternate_list)
+            alternate = alternate_list[0] if alternate_list else None
             
             return _safe_string(primary), _safe_string(alternate)
             

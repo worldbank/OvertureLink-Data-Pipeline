@@ -52,8 +52,8 @@ On macOS/Linux:
 `pip install -e .`
 
 ### 3. Define Environment
-- Use the `.env` example to define your AGOL credentials
-- No need to create country-specific config files, you can use the global config with a country argument
+- Copy `.env.example` to `.env` and fill in your AGOL credentials
+- No need to create country-specific config files. One config covers all 176 countries; you pick the country with `--country` at run time
 
 **2FA / Browser Login (Recommended)**
 - Set `AGOL_AUTH_METHOD=oauth` and `AGOL_CLIENT_ID=...` (no username/password required).
@@ -91,9 +91,22 @@ sharing:
 - Country keys are matched in this order: ISO3, ISO2, then country name (case-insensitive).
 - Sharing is additive: existing shares are kept, configured shares are added.
 - Missing or inaccessible groups are logged as warnings and skipped (publish continues).
+- The `sharing:` block ships commented out. Until you populate it, layers publish
+  successfully but receive no groups and stay private. Each run logs an
+  `AGOL sharing summary` line; check `skipped_missing=0` to confirm the shares landed.
 
-### 4. Run commands
-The Python CLI has three main commands: uploading to AGOL `arcgis-upload` , downloading as geojson `export`, or download dump for local use as needed `overture-dump`. 
+### 4. Run your first command
+Every command follows the same shape: what you want to do, which query, and which country.
+
+```bash
+# Export Bangladesh roads to a GeoPackage, no AGOL credentials needed
+o2agol export roads --country bgd
+
+# Same query, published to ArcGIS Online
+o2agol arcgis-upload roads --country bgd
+```
+
+Add `--limit 1000` while you are testing so you are not pulling a whole country each time.
 
 ## Outputs
 
@@ -114,7 +127,8 @@ To build your command, you need three elements:
 - The country you are querying
 
 ### Choosing a Query
-There are sets of queries prebuilt that you can find below and in the configs file, but you can create your own. 
+Seven queries ship with the pipeline. You can add your own in `src/o2agol/data/queries.yml`,
+or list what is available with `o2agol list-queries`.
 
 #### Lines
 - `roads` - Transportation networks (all roads, not filtered).
@@ -130,6 +144,9 @@ There are sets of queries prebuilt that you can find below and in the configs fi
 #### Polygons Only
 - `buildings` - Building footprints
 
+#### Mixed Geometry (split into separate layers)
+- `power` - Electrical power infrastructure. Split into point, line, and polygon layers.
+
 ### Choosing a Country
 
 - `--country <code>` - Specify country by name, ISO2, or ISO3 code (e.g., `--country afghanistan`, `--country af`, `--country afg`)
@@ -141,8 +158,29 @@ Below is a list of optional arguments. Useful if you need to tailor your command
 - `--limit 1000` - Limits the features for testing purposes
 - `--verbose` / `-v` - Enable detailed debug logging output  
 - `--log-to-file` - Create timestamped log files in "/logs" directory
-- `--dry-run` - Processes but doesn't publish to AGOL, good for testing without uploading every test
-- `-c configs/global.yml` - Choose another config (global.yml is default) 
+- `--dry-run` - Validates the configuration without publishing. Available on `arcgis-upload` and `overture-dump`, not on `export`
+- `-c src/o2agol/data/agol_metadata.yml` - Choose another config (this is the default)
+- `--release 2026-07-22.0` - Pin a specific Overture release (see below)
+- `--use-bbox` / `--use-divisions` - Bounding box is faster for development; divisions is accurate for production (default)
+- `--format gpkg` - Output format for `export` (`geojson`, `gpkg`, `fgdb`), or staging format for `arcgis-upload`
+- `--raw` - Export raw Overture data without the AGOL schema transformations
+- `--async` / `--no-async` - Override async append. Defaults to the `USE_ASYNC_APPEND` environment variable
+- `--force-download` - Replace an existing local dump instead of reusing it
+
+### Choosing an Overture release
+By default the pipeline resolves the newest release from the Overture catalog on every
+run, so you always get current data without editing any config.
+
+To reproduce an earlier run, pin the release explicitly:
+
+```bash
+o2agol arcgis-upload roads --country bgd --release 2026-07-22.0
+o2agol export places --country bgd --release 2026-07-22.0
+```
+
+`--release` works on `arcgis-upload`, `export`, and `overture-dump`. The
+`OVERTURE_RELEASE` variable in `.env` is only a fallback for when the Overture
+catalog cannot be reached, so use `--release` when you need a run pinned.
 
 ### Modes
 - `--mode auto` (default) - Smart detection: automatically creates new layers or updates existing ones based on service name
@@ -204,7 +242,7 @@ o2agol list-cache
 
 # Clear cache by country or release
 o2agol clear-cache --country afg
-o2agol clear-cache --release 2025-07-23.0
+o2agol clear-cache --release 2026-07-22.0
 
 # Force fresh download (replaces existing)
 o2agol overture-dump buildings --country afg --force-download
@@ -213,7 +251,7 @@ o2agol overture-dump buildings --country afg --force-download
 ### Troubleshooting
 - **Validation errors**: Use `--force-download` to refresh cached data
 - **Memory errors**: Reduce `DUMP_MAX_MEMORY` environment variable or use `--limit` for testing
-- **Storage issues**: Use `o2agol cache-list` to monitor disk usage
+- **Storage issues**: Use `o2agol list-cache` to monitor disk usage
 - **Performance**: Use `--use-bbox` for development, `--use-divisions` for production accuracy
 
 ## Future Enhancements
