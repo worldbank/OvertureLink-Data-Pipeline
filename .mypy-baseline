@@ -180,10 +180,6 @@ src/o2agol/pipeline/source.py:0: error: Incompatible default for parameter "rele
 src/o2agol/pipeline/source.py:0: note: PEP 484 prohibits implicit Optional. Accordingly, mypy has changed its default to no_implicit_optional=True
 src/o2agol/pipeline/source.py:0: note: Use https://github.com/hauntsaninja/no_implicit_optional to automatically upgrade your codebase
 src/o2agol/pipeline/source.py:0: error: Missing type arguments for generic type "dict"  [type-arg]
-src/o2agol/pipeline/source.py:0: error: Function is missing a type annotation  [no-untyped-def]
-src/o2agol/pipeline/source.py:0: error: Call to untyped function "has_primary_category" in typed context  [no-untyped-call]
-src/o2agol/pipeline/source.py:0: error: Function is missing a type annotation  [no-untyped-def]
-src/o2agol/pipeline/source.py:0: error: Call to untyped function "has_primary_category_in_list" in typed context  [no-untyped-call]
 src/o2agol/cli.py:0: error: Function is missing a return type annotation  [no-untyped-def]
 src/o2agol/cli.py:0: error: Missing type arguments for generic type "dict"  [type-arg]
 src/o2agol/cli.py:0: error: Call to untyped function "close" in typed context  [no-untyped-call]
