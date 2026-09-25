@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import duckdb
 import geopandas as gpd
@@ -50,8 +50,8 @@ OVERTURE_COLUMNS = {
     'place': [  # Places
         'id',
         'names.primary as name',
-        'categories',  # Full categories struct for filtering
-        'categories.primary as category',  # Simplified category for export
+        'taxonomy',  # Full taxonomy struct for filtering (replaces categories as of 2026-09)
+        'taxonomy.primary as category',  # Simplified category for export
         'confidence',
         # 'addresses',  # Complex struct array
         # 'websites',   # Array of strings
@@ -71,13 +71,27 @@ OVERTURE_COLUMNS = {
 }
 
 
+def _resolve_nested(value: Any, path: str) -> Any:
+    """Resolve a dotted path with optional 1-based SQL list indexes, e.g. 'hierarchy[1]'."""
+    for part in path.split("."):
+        key, _, index = part.partition("[")
+        value = value.get(key) if isinstance(value, dict) else None
+        if index:
+            if value is None or isinstance(value, str):
+                return None
+            items = list(value)
+            position = int(index.rstrip("]")) - 1
+            value = items[position] if 0 <= position < len(items) else None
+    return value
+
+
 def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame:
     """
     Apply SQL-style filter string to a GeoDataFrame.
-    
+
     Supports basic SQL conditions like:
     - subtype = 'medical'
-    - categories.primary = 'health_and_medical'
+    - taxonomy.hierarchy[1] = 'health_care'
     
     Args:
         gdf: GeoDataFrame to filter
@@ -97,13 +111,12 @@ def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame
                 column = parts[0].strip()
                 value = parts[1].strip().strip("'\"")
                 
-                # Handle nested column access like 'categories.primary'
+                # Handle nested column access like 'taxonomy.hierarchy[1]'
                 if "." in column:
                     base_col, nested_key = column.split(".", 1)
                     if base_col in gdf.columns:
                         logging.debug(f"Applying nested filter: {column} = {value}")
-                        # Filter based on nested dictionary access
-                        mask = gdf[base_col].apply(lambda x: isinstance(x, dict) and x.get(nested_key) == value if x is not None else False)
+                        mask = gdf[base_col].apply(lambda x: _resolve_nested(x, nested_key) == value)
                         return gdf[mask]
                     else:
                         logging.warning(f"Base column '{base_col}' not found in data, returning empty result")
@@ -127,13 +140,12 @@ def apply_sql_filter(gdf: gpd.GeoDataFrame, sql_filter: str) -> gpd.GeoDataFrame
                     # Split by comma and clean up quotes
                     values = [v.strip().strip("'\"") for v in values_str.split(",")]
                     
-                    # Handle nested column access like 'categories.primary'
+                    # Handle nested column access like 'taxonomy.hierarchy[1]'
                     if "." in column:
                         base_col, nested_key = column.split(".", 1)
                         if base_col in gdf.columns:
                             logging.debug(f"Applying nested IN filter: {column} IN {values}")
-                            # Filter based on nested dictionary access
-                            mask = gdf[base_col].apply(lambda x: isinstance(x, dict) and x.get(nested_key) in values if x is not None else False)
+                            mask = gdf[base_col].apply(lambda x: _resolve_nested(x, nested_key) in values)
                             return gdf[mask]
                         else:
                             logging.warning(f"Base column '{base_col}' not found in data, returning empty result")
@@ -1777,79 +1789,3 @@ class OvertureSource:
         
         return gdf
     
-    def _apply_target_filter(self, gdf: gpd.GeoDataFrame, target_filter: str) -> gpd.GeoDataFrame:
-        """
-        Apply target-specific filter to GeoDataFrame using same logic as duck.py.
-        
-        Args:
-            gdf: GeoDataFrame to filter
-            target_filter: Filter string to apply
-            
-        Returns:
-            Filtered GeoDataFrame
-        """
-        try:
-            import re
-
-            import pandas as pd
-            
-            if 'categories.primary =' in target_filter:
-                # Handle categories.primary = 'value' filters
-                match = re.search(r"categories\.primary = '([^']+)'", target_filter)
-                if match:
-                    allowed_category = match.group(1)
-                    if 'category_primary' in gdf.columns:
-                        # Use normalized column if available
-                        gdf = gdf[gdf['category_primary'] == allowed_category]
-                    elif 'categories' in gdf.columns:
-                        # Use raw Overture categories column (JSON)
-                        def has_primary_category(categories_json, target_cat):
-                            if pd.isna(categories_json) or categories_json is None:
-                                return False
-                            if isinstance(categories_json, dict) and 'primary' in categories_json:
-                                return categories_json['primary'] == target_cat
-                            return False
-                        
-                        gdf = gdf[gdf['categories'].apply(lambda x: has_primary_category(x, allowed_category))]
-                        
-            elif 'categories.primary IN' in target_filter:
-                # Handle categories.primary IN (...) filters
-                match = re.search(r"categories\.primary IN \('([^']+)'\)", target_filter)
-                if match:
-                    allowed_categories = match.group(1).split("', '")
-                    if 'category_primary' in gdf.columns:
-                        # Use normalized column if available
-                        gdf = gdf[gdf['category_primary'].isin(allowed_categories)]
-                    elif 'categories' in gdf.columns:
-                        # Use raw Overture categories column (JSON)
-                        def has_primary_category_in_list(categories_json, target_cats):
-                            if pd.isna(categories_json) or categories_json is None:
-                                return False
-                            if isinstance(categories_json, dict) and 'primary' in categories_json:
-                                return categories_json['primary'] in target_cats
-                            return False
-                        
-                        gdf = gdf[gdf['categories'].apply(lambda x: has_primary_category_in_list(x, allowed_categories))]
-                        
-            elif 'subtype =' in target_filter:
-                # Handle subtype = 'value' filters
-                match = re.search(r"subtype = '([^']+)'", target_filter)
-                if match:
-                    allowed_subtype = match.group(1)
-                    if 'subtype' in gdf.columns:
-                        gdf = gdf[gdf['subtype'] == allowed_subtype]
-                        
-            elif 'subtype IN' in target_filter:
-                # Handle subtype IN (...) filters
-                match = re.search(r"subtype IN \('([^']+)'\)", target_filter)
-                if match:
-                    allowed_subtypes = match.group(1).split("', '")
-                    if 'subtype' in gdf.columns:
-                        gdf = gdf[gdf['subtype'].isin(allowed_subtypes)]
-            
-            logging.debug(f"Applied target filter '{target_filter}': {len(gdf)} features remaining")
-            return gdf
-            
-        except Exception as e:
-            logging.warning(f"Failed to apply target filter '{target_filter}': {e}")
-            return gdf
